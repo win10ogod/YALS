@@ -396,7 +396,7 @@ async function generateToolCalls(
         logger.info(`Tool call detected for request ${gen.requestId}`);
 
         if (gen.fullText) {
-            prompt += prompt + gen.fullText;
+            prompt += gen.fullText;
         }
 
         const toolCtx = {
