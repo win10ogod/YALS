@@ -264,7 +264,7 @@ router.post(
                 });
             }
 
-            text = applyChatTemplate(
+            const result = applyChatTemplate(
                 c.var.model,
                 c.var.model.promptTemplate,
                 params.text,
@@ -273,6 +273,7 @@ router.post(
                     addGenerationPrompt: false,
                 },
             );
+            text = result.prompt;
         } else {
             throw new HTTPException(422, {
                 message: "Unable to tokenize the provided text. " +

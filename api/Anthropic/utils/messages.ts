@@ -106,7 +106,7 @@ export function convertStopReason(chunk: FinishChunk): StopReason | null {
     switch (chunk.finishReason) {
         case "StopToken":
             return "end_turn";
-        case "MaxTokens":
+        case "MaxNewTokens":
             return "max_tokens";
         case "StopString":
             return "stop_sequence";
@@ -289,33 +289,47 @@ export function convertSamplerParams(params: AnthropicMessagesRequest) {
     return {
         max_tokens: params.max_tokens,
         temperature: params.temperature ?? 1.0,
-        top_p: params.top_p,
-        top_k: params.top_k,
+        top_p: params.top_p ?? 1.0,
+        top_k: params.top_k ?? 0,
         stop: params.stop_sequences || [],
-        // Map other params as needed
+        // Generation options
         min_tokens: 0,
+        add_bos_token: undefined,
+        ban_eos_token: false,
+        seed: undefined,
+        logit_bias: {},
+        json_schema: undefined,
+        regex_pattern: undefined,
+        grammar_string: undefined,
+        banned_tokens: [],
+        banned_strings: [],
+        // Penalty samplers
         repetition_penalty: 1.0,
         frequency_penalty: 0,
         presence_penalty: 0,
-        banned_tokens: [],
-        banned_strings: [],
-        mirostat_mode: 0,
-        mirostat_tau: 5.0,
-        mirostat_eta: 0.1,
+        penalty_range: -1,
+        // Alphabet samplers
         min_p: 0.0,
         typical: 1.0,
-        penalty_range: -1,
         nsigma: 0.0,
+        // Mirostat
+        mirostat_mode: 0,
+        mirostat_tau: 1.0,
+        mirostat_eta: 0.0,
+        // DRY
         dry_multiplier: 0.0,
-        dry_base: 1.75,
-        dry_allowed_length: 2,
+        dry_base: 0.0,
+        dry_allowed_length: 0,
         dry_range: 0,
         dry_sequence_breakers: [],
+        // Temperature
         temperature_last: false,
+        // XTC
         xtc_probability: 0.0,
         xtc_threshold: 0.1,
-        n: 1,
-        seed: 0,
-        ban_eos_token: false,
+        // Dynamic temperature
+        max_temp: 1.0,
+        min_temp: 1.0,
+        temp_exponent: 1.0,
     };
 }

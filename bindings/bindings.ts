@@ -427,13 +427,14 @@ export class Model {
                 const fullMmprojPath = Path.join(Path.dirname(modelPath), mmprojPath);
                 logger.info(`Initializing multimodal context from ${fullMmprojPath}`);
 
-                multimodalContext = await MultimodalContext.init(
+                const initResult = await MultimodalContext.init(
                     fullMmprojPath,
                     model,
                     params.multimodal_gpu,
                     params.multimodal_threads,
                     params.multimodal_warmup,
                 );
+                multimodalContext = initResult ?? undefined;
 
                 if (multimodalContext) {
                     if (multimodalContext.supportsVision) {

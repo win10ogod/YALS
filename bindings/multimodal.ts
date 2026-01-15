@@ -262,7 +262,7 @@ export class MultimodalContext {
             textBuffer,
             addSpecial,
             parseSpecial,
-            bitmapPtrs,
+            new Uint8Array(bitmapPtrs.buffer),
             BigInt(bitmaps.length),
         );
 

@@ -4,7 +4,6 @@
  */
 
 import * as z from "@/common/myZod.ts";
-import { BaseSamplerRequest } from "@/common/sampling.ts";
 
 // ~~~ Content Block Types ~~~
 
@@ -136,7 +135,7 @@ export const AnthropicMessagesRequest = z.object({
     metadata: z.object({
         user_id: z.string().optional(),
     }).optional(),
-}).and(BaseSamplerRequest.partial());
+});
 
 export type AnthropicMessagesRequest = z.infer<typeof AnthropicMessagesRequest>;
 
