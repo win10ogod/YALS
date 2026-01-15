@@ -272,6 +272,123 @@ extern "C" {
     // ~~~ Features ~~~
 
     bool has_llguidance();
+    bool has_multimodal();
+
+#ifdef MULTIMODAL_ENABLED
+    // ~~~ Multimodal (MTMD) ~~~
+
+    // Opaque types
+    typedef struct mtmd_context mtmd_context;
+    typedef struct mtmd_bitmap mtmd_bitmap;
+    typedef struct mtmd_input_chunks mtmd_input_chunks;
+    typedef struct mtmd_input_chunk mtmd_input_chunk;
+
+    // Initialize multimodal context from mmproj file
+    // Returns nullptr on failure
+    mtmd_context* mtmd_ctx_init(
+        const char* mmproj_path,
+        const llama_model* model,
+        bool use_gpu,
+        int n_threads,
+        bool warmup);
+
+    void mtmd_ctx_free(
+        mtmd_context* ctx);
+
+    // Check capabilities
+    bool mtmd_ctx_supports_vision(
+        const mtmd_context* ctx);
+
+    bool mtmd_ctx_supports_audio(
+        const mtmd_context* ctx);
+
+    // Get the default media marker string
+    const char* mtmd_get_default_marker();
+
+    // Create bitmap from raw RGB data (width * height * 3 bytes)
+    mtmd_bitmap* mtmd_bitmap_create(
+        uint32_t width,
+        uint32_t height,
+        const unsigned char* rgb_data);
+
+    // Create bitmap from encoded image bytes (JPEG, PNG, etc.)
+    // Returns nullptr on failure
+    mtmd_bitmap* mtmd_bitmap_from_bytes(
+        const unsigned char* data,
+        size_t data_length);
+
+    void mtmd_bitmap_destroy(
+        mtmd_bitmap* bitmap);
+
+    // Get bitmap dimensions
+    uint32_t mtmd_bitmap_get_width(
+        const mtmd_bitmap* bitmap);
+
+    uint32_t mtmd_bitmap_get_height(
+        const mtmd_bitmap* bitmap);
+
+    // Tokenize text with images
+    // text should contain <__media__> markers for each image
+    // Returns input chunks (must be freed with mtmd_chunks_free)
+    // Returns nullptr on failure
+    mtmd_input_chunks* mtmd_tokenize_with_media(
+        mtmd_context* ctx,
+        const char* text,
+        bool add_special,
+        bool parse_special,
+        const mtmd_bitmap** bitmaps,
+        size_t n_bitmaps);
+
+    void mtmd_chunks_free(
+        mtmd_input_chunks* chunks);
+
+    // Get number of chunks
+    size_t mtmd_chunks_size(
+        const mtmd_input_chunks* chunks);
+
+    // Get chunk at index
+    const mtmd_input_chunk* mtmd_chunks_get(
+        const mtmd_input_chunks* chunks,
+        size_t idx);
+
+    // Get total token count from all chunks
+    size_t mtmd_chunks_get_total_tokens(
+        const mtmd_input_chunks* chunks);
+
+    // Get chunk type (0=text, 1=image, 2=audio)
+    int mtmd_chunk_get_type(
+        const mtmd_input_chunk* chunk);
+
+    // Get tokens from a text chunk
+    // Returns nullptr for non-text chunks
+    const int32_t* mtmd_chunk_get_tokens(
+        const mtmd_input_chunk* chunk,
+        size_t* n_tokens_out);
+
+    // Get token count from a chunk
+    size_t mtmd_chunk_get_n_tokens(
+        const mtmd_input_chunk* chunk);
+
+    // Encode a media chunk (image/audio) and get embeddings
+    // Returns 0 on success
+    int32_t mtmd_encode_chunk(
+        mtmd_context* ctx,
+        const mtmd_input_chunk* chunk);
+
+    // Get output embeddings from the last encode pass
+    // Size: llama_n_embd(model) * mtmd_chunk_get_n_tokens(chunk) * sizeof(float)
+    float* mtmd_get_output_embd(
+        mtmd_context* ctx);
+
+    // Check if we need non-causal mask before llama_decode
+    bool mtmd_decode_use_non_causal(
+        const mtmd_context* ctx);
+
+    // Check if model uses M-RoPE for llama_decode
+    bool mtmd_decode_use_mrope(
+        const mtmd_context* ctx);
+
+#endif // MULTIMODAL_ENABLED
 
 #ifdef __cplusplus
 }

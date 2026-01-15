@@ -9,12 +9,22 @@ import { ToolCall, ToolSpec } from "./tools.ts";
 
 const ChatCompletionImageUrl = z.object({
     url: z.string(),
+    detail: z.enum(["auto", "low", "high"]).nullish().coalesce("auto"),
+});
+
+// Support inline base64 images (Anthropic-style)
+const ChatCompletionImageSource = z.object({
+    type: z.literal("base64"),
+    media_type: z.string(),
+    data: z.string(),
 });
 
 const ChatCompletionMessagePart = z.object({
     type: z.string().nullish().coalesce("text"),
     text: z.string().cleanOptional(),
     image_url: ChatCompletionImageUrl.cleanOptional(),
+    // Support direct base64 source (alternative format)
+    source: ChatCompletionImageSource.cleanOptional(),
 });
 
 export type ChatCompletionMessagePart = z.infer<

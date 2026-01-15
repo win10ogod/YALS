@@ -27,6 +27,14 @@ import { logger } from "@/common/logging.ts";
 import { ToolSpec } from "../types/tools.ts";
 import { TOOL_CALL_SCHEMA, ToolCallProcessor } from "./tools.ts";
 import { OAIContext } from "../types/context.ts";
+import {
+    MultimodalImageData,
+    parseOpenAIImageUrl,
+    isDataUrl,
+    getMediaTypeFromDataUrl,
+    extractBase64FromDataUrl,
+} from "@/common/imageProcessing.ts";
+import { MultimodalContext } from "@/bindings/multimodal.ts";
 
 interface TemplateFormatOptions {
     addBosToken?: boolean;
@@ -117,30 +125,80 @@ function createUsageChunk(
     return response;
 }
 
+/** Result of processing chat messages for multimodal */
+export interface ProcessedChatResult {
+    prompt: string;
+    images: MultimodalImageData[];
+}
+
+/**
+ * Extract images from message content parts
+ */
+function extractImagesFromContent(
+    content: ChatCompletionMessagePart[],
+): { text: string; images: MultimodalImageData[] } {
+    const textParts: string[] = [];
+    const images: MultimodalImageData[] = [];
+    const mediaMarker = MultimodalContext.getDefaultMarker();
+
+    for (const part of content) {
+        if (part.type === "text" && part.text) {
+            textParts.push(part.text);
+        } else if (part.type === "image_url" && part.image_url) {
+            // OpenAI-style image_url
+            const imageData = parseOpenAIImageUrl(part.image_url);
+            images.push(imageData);
+            // Insert placeholder for image
+            textParts.push(mediaMarker);
+        } else if (part.source?.type === "base64") {
+            // Anthropic-style direct base64 source
+            images.push({
+                type: "base64",
+                data: part.source.data,
+                mediaType: part.source.media_type,
+            });
+            textParts.push(mediaMarker);
+        }
+    }
+
+    return {
+        text: textParts.join(""),
+        images,
+    };
+}
+
 export function applyChatTemplate(
     model: Model,
     promptTemplate: PromptTemplate,
     messages: ChatCompletionMessage[],
     options: TemplateFormatOptions = {},
-): string {
+): ProcessedChatResult {
     const {
         addGenerationPrompt = true,
         templateVars = {},
     } = options;
 
-    messages.forEach((message) => {
+    const allImages: MultimodalImageData[] = [];
+
+    // Process messages to extract images
+    const processedMessages = messages.map((message) => {
         if (Array.isArray(message.content)) {
             const messageParts = message.content as ChatCompletionMessagePart[];
-            message.content = messageParts.find((part) =>
-                part.type === "text"
-            )?.text ?? "";
+            const { text, images } = extractImagesFromContent(messageParts);
+            allImages.push(...images);
+
+            return {
+                ...message,
+                content: text,
+            };
         }
+        return message;
     });
 
     const bosToken = model.tokenizer.bosToken;
     let prompt = promptTemplate.template.render({
         ...templateVars,
-        messages: messages,
+        messages: processedMessages,
         bos_token: bosToken?.piece ?? "",
         eos_token: model.tokenizer.eosToken?.piece ?? "",
         add_generation_prompt: addGenerationPrompt,
@@ -168,7 +226,7 @@ export function applyChatTemplate(
         prompt = prompt.slice(bosToken.piece.length);
     }
 
-    return prompt;
+    return { prompt, images: allImages };
 }
 
 function addTemplateMetadata(
@@ -212,7 +270,7 @@ export async function streamChatCompletion(
         }
     });
 
-    const prompt = applyChatTemplate(
+    const { prompt, images } = applyChatTemplate(
         ctx.model,
         promptTemplate,
         params.messages,
@@ -223,6 +281,14 @@ export async function streamChatCompletion(
             responsePrefix: params.response_prefix,
         },
     );
+
+    // Log if images are present but multimodal is not available
+    if (images.length > 0 && !ctx.model.multimodalContext) {
+        logger.warn(
+            `Request contains ${images.length} image(s) but multimodal support is not available. ` +
+            `Images will be ignored. Load a model with mmproj to enable vision support.`,
+        );
+    }
 
     addTemplateMetadata(promptTemplate, params);
 
@@ -319,7 +385,7 @@ export async function generateChatCompletion(
 ) {
     logger.info(`Received chat completion request ${ctx.requestId}`);
 
-    const prompt = applyChatTemplate(
+    const { prompt, images } = applyChatTemplate(
         ctx.model,
         promptTemplate,
         params.messages,
@@ -330,6 +396,14 @@ export async function generateChatCompletion(
             responsePrefix: params.response_prefix,
         },
     );
+
+    // Log if images are present but multimodal is not available
+    if (images.length > 0 && !ctx.model.multimodalContext) {
+        logger.warn(
+            `Request contains ${images.length} image(s) but multimodal support is not available. ` +
+            `Images will be ignored. Load a model with mmproj to enable vision support.`,
+        );
+    }
 
     addTemplateMetadata(promptTemplate, params);
 

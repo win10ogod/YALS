@@ -68,6 +68,12 @@ export const ModelConfig = z.object({
     override_tensor: z.array(z.string()).nullish().coalesce([]),
     n_cpu_moe: z.union([z.number(), z.literal("all")]).cleanOptional(),
     mmap: z.boolean().nullish().coalesce(true),
+
+    // Multimodal options
+    mmproj_path: z.string().cleanOptional(), // Path to vision projector (mmproj) file
+    multimodal_gpu: z.boolean().nullish().coalesce(true), // Use GPU for multimodal encoding
+    multimodal_threads: z.number().nullish().coalesce(4), // Threads for multimodal processing
+    multimodal_warmup: z.boolean().nullish().coalesce(true), // Run warmup pass on init
 });
 
 export type ModelConfig = z.infer<typeof ModelConfig>;

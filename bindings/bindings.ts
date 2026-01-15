@@ -20,6 +20,7 @@ import {
     ReadbackFinishChunk,
 } from "./types.ts";
 import { adjustCacheSize, pointerArrayFromStrings } from "./utils.ts";
+import { MultimodalContext } from "./multimodal.ts";
 
 // TODO: Move this somewhere else
 interface LogitBias {
@@ -180,6 +181,7 @@ export class Model {
     path: Path.ParsedPath;
     tokenizer: Tokenizer;
     promptTemplate?: PromptTemplate;
+    multimodalContext?: MultimodalContext;
 
     private constructor(
         model: Deno.PointerValue,
@@ -190,6 +192,7 @@ export class Model {
         tokenizer: Tokenizer,
         maxSeqLen: number,
         promptTemplate?: PromptTemplate,
+        multimodalContext?: MultimodalContext,
     ) {
         this.model = model;
         this.context = context;
@@ -199,6 +202,7 @@ export class Model {
         this.tokenizer = tokenizer;
         this.promptTemplate = promptTemplate;
         this.maxSeqLen = maxSeqLen;
+        this.multimodalContext = multimodalContext;
     }
 
     static async init(
@@ -398,6 +402,52 @@ export class Model {
                 `and ${params.num_slots} slot(s)`,
         );
 
+        // Initialize multimodal context if mmproj is specified or auto-detect
+        let multimodalContext: MultimodalContext | undefined;
+        if (MultimodalContext.isAvailable()) {
+            let mmprojPath = params.mmproj_path;
+
+            // Auto-detect mmproj file if not specified
+            if (!mmprojPath) {
+                const modelDir = Path.dirname(modelPath);
+                try {
+                    for await (const entry of Deno.readDir(modelDir)) {
+                        if (entry.isFile && entry.name.includes("mmproj") && entry.name.endsWith(".gguf")) {
+                            mmprojPath = entry.name;
+                            logger.info(`Auto-detected mmproj file: ${mmprojPath}`);
+                            break;
+                        }
+                    }
+                } catch {
+                    // Directory read failed, skip auto-detection
+                }
+            }
+
+            if (mmprojPath) {
+                const fullMmprojPath = Path.join(Path.dirname(modelPath), mmprojPath);
+                logger.info(`Initializing multimodal context from ${fullMmprojPath}`);
+
+                multimodalContext = await MultimodalContext.init(
+                    fullMmprojPath,
+                    model,
+                    params.multimodal_gpu,
+                    params.multimodal_threads,
+                    params.multimodal_warmup,
+                );
+
+                if (multimodalContext) {
+                    if (multimodalContext.supportsVision) {
+                        logger.info("Vision (image) support enabled");
+                    }
+                    if (multimodalContext.supportsAudio) {
+                        logger.info("Audio support enabled");
+                    }
+                } else {
+                    logger.warn(`Failed to initialize multimodal context from ${fullMmprojPath}`);
+                }
+            }
+        }
+
         return new Model(
             model,
             context,
@@ -407,6 +457,7 @@ export class Model {
             tokenizer,
             maxSeqLen,
             promptTemplate,
+            multimodalContext,
         );
     }
 
@@ -443,6 +494,12 @@ export class Model {
 
         // Wait for jobs to complete
         await this.waitForJobs(skipWait);
+
+        // Free multimodal context if present
+        if (this.multimodalContext) {
+            this.multimodalContext.free();
+            this.multimodalContext = undefined;
+        }
 
         lib.symbols.model_free(this.model);
         lib.symbols.ctx_free(this.context);

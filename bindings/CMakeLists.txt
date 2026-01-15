@@ -3,6 +3,7 @@ project(LlamaMultiUserInference)
 set(CMAKE_CXX_STANDARD 17)
 
 option(LLGUIDANCE "Enable LLGuidance support (requires Rust)" OFF)
+option(MULTIMODAL "Enable multimodal (vision/audio) support" OFF)
 
 # Set RPath for Apple and Unix systems
 if (APPLE)
@@ -28,7 +29,7 @@ endif()
 if (DEFINED LLAMACPP_COMMIT)
     set(USE_CUSTOM_LLAMA ON)
 else()
-    set(LLAMACPP_COMMIT "086a63e3a5d2dbbb7183a74db453459e544eb55a")
+    set(LLAMACPP_COMMIT "d98b548120eecf98f0f6eaa1ba7e29b3afda9f2e")
 endif()
 
 if (USE_CUSTOM_LLAMA)
@@ -84,6 +85,13 @@ FetchContent_MakeAvailable(llama)
 
 message(STATUS "llama source dir: ${llama_SOURCE_DIR}")
 
+# Build mtmd (multimodal) if enabled
+if(MULTIMODAL)
+    message(STATUS "Building with multimodal (vision/audio) support")
+    # Add mtmd subdirectory from llama.cpp tools
+    add_subdirectory(${llama_SOURCE_DIR}/tools/mtmd ${CMAKE_BINARY_DIR}/mtmd)
+endif()
+
 # Apple build changes
 # From llama-cpp-python
 if (APPLE AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
@@ -112,7 +120,13 @@ target_include_directories(c_library PUBLIC
 )
 
 # Link llama libraries to our c_library
-target_link_libraries(c_library PUBLIC llama common)
+if(MULTIMODAL)
+    target_link_libraries(c_library PUBLIC llama common mtmd)
+    target_compile_definitions(c_library PUBLIC MULTIMODAL_ENABLED=1)
+    target_include_directories(c_library PUBLIC ${llama_SOURCE_DIR}/tools/mtmd)
+else()
+    target_link_libraries(c_library PUBLIC llama common)
+endif()
 
 # Create our main executable
 add_executable(multi_user_inference

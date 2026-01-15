@@ -338,3 +338,189 @@ bool has_llguidance() {
         return false;
     #endif
 }
+
+bool has_multimodal() {
+    #ifdef MULTIMODAL_ENABLED
+        return true;
+    #else
+        return false;
+    #endif
+}
+
+#ifdef MULTIMODAL_ENABLED
+
+#include "mtmd.h"
+
+// stb_image for decoding image bytes
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#define STBI_ONLY_BMP
+#define STBI_ONLY_GIF
+#include "stb_image.h"
+
+mtmd_context* mtmd_ctx_init(
+    const char* mmproj_path,
+    const llama_model* model,
+    bool use_gpu,
+    int n_threads,
+    bool warmup) {
+
+    mtmd_context_params params = mtmd_context_params_default();
+    params.use_gpu = use_gpu;
+    params.n_threads = n_threads;
+    params.warmup = warmup;
+
+    return mtmd_init_from_file(mmproj_path, model, params);
+}
+
+void mtmd_ctx_free(mtmd_context* ctx) {
+    mtmd_free(ctx);
+}
+
+bool mtmd_ctx_supports_vision(const mtmd_context* ctx) {
+    return mtmd_support_vision(const_cast<mtmd_context*>(ctx));
+}
+
+bool mtmd_ctx_supports_audio(const mtmd_context* ctx) {
+    return mtmd_support_audio(const_cast<mtmd_context*>(ctx));
+}
+
+const char* mtmd_get_default_marker() {
+    return mtmd_default_marker();
+}
+
+mtmd_bitmap* mtmd_bitmap_create(
+    uint32_t width,
+    uint32_t height,
+    const unsigned char* rgb_data) {
+
+    return mtmd_bitmap_init(width, height, rgb_data);
+}
+
+mtmd_bitmap* mtmd_bitmap_from_bytes(
+    const unsigned char* data,
+    size_t data_length) {
+
+    int width, height, channels;
+    unsigned char* img = stbi_load_from_memory(
+        data, static_cast<int>(data_length),
+        &width, &height, &channels, 3); // Force RGB
+
+    if (!img) {
+        return nullptr;
+    }
+
+    mtmd_bitmap* bitmap = mtmd_bitmap_init(
+        static_cast<uint32_t>(width),
+        static_cast<uint32_t>(height),
+        img);
+
+    stbi_image_free(img);
+    return bitmap;
+}
+
+void mtmd_bitmap_destroy(mtmd_bitmap* bitmap) {
+    mtmd_bitmap_free(bitmap);
+}
+
+uint32_t mtmd_bitmap_get_width(const mtmd_bitmap* bitmap) {
+    return mtmd_bitmap_get_nx(bitmap);
+}
+
+uint32_t mtmd_bitmap_get_height(const mtmd_bitmap* bitmap) {
+    return mtmd_bitmap_get_ny(bitmap);
+}
+
+mtmd_input_chunks* mtmd_tokenize_with_media(
+    mtmd_context* ctx,
+    const char* text,
+    bool add_special,
+    bool parse_special,
+    const mtmd_bitmap** bitmaps,
+    size_t n_bitmaps) {
+
+    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+
+    mtmd_input_text input_text;
+    input_text.text = text;
+    input_text.add_special = add_special;
+    input_text.parse_special = parse_special;
+
+    int32_t result = mtmd_tokenize(ctx, chunks, &input_text, bitmaps, n_bitmaps);
+
+    if (result != 0) {
+        mtmd_input_chunks_free(chunks);
+        return nullptr;
+    }
+
+    return chunks;
+}
+
+void mtmd_chunks_free(mtmd_input_chunks* chunks) {
+    mtmd_input_chunks_free(chunks);
+}
+
+size_t mtmd_chunks_size(const mtmd_input_chunks* chunks) {
+    return mtmd_input_chunks_size(chunks);
+}
+
+const mtmd_input_chunk* mtmd_chunks_get(
+    const mtmd_input_chunks* chunks,
+    size_t idx) {
+
+    return mtmd_input_chunks_get(chunks, idx);
+}
+
+size_t mtmd_chunks_get_total_tokens(const mtmd_input_chunks* chunks) {
+    size_t total = 0;
+    size_t n_chunks = mtmd_input_chunks_size(chunks);
+
+    for (size_t i = 0; i < n_chunks; i++) {
+        const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks, i);
+        total += mtmd_input_chunk_get_n_tokens(chunk);
+    }
+
+    return total;
+}
+
+int mtmd_chunk_get_type(const mtmd_input_chunk* chunk) {
+    return static_cast<int>(mtmd_input_chunk_get_type(chunk));
+}
+
+const int32_t* mtmd_chunk_get_tokens(
+    const mtmd_input_chunk* chunk,
+    size_t* n_tokens_out) {
+
+    if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        if (n_tokens_out) *n_tokens_out = 0;
+        return nullptr;
+    }
+
+    return mtmd_input_chunk_get_tokens_text(chunk, n_tokens_out);
+}
+
+size_t mtmd_chunk_get_n_tokens(const mtmd_input_chunk* chunk) {
+    return mtmd_input_chunk_get_n_tokens(chunk);
+}
+
+int32_t mtmd_encode_chunk(
+    mtmd_context* ctx,
+    const mtmd_input_chunk* chunk) {
+
+    return ::mtmd_encode_chunk(ctx, chunk);
+}
+
+float* mtmd_get_output_embd(mtmd_context* ctx) {
+    return ::mtmd_get_output_embd(ctx);
+}
+
+bool mtmd_decode_use_non_causal(const mtmd_context* ctx) {
+    return ::mtmd_decode_use_non_causal(const_cast<mtmd_context*>(ctx));
+}
+
+bool mtmd_decode_use_mrope(const mtmd_context* ctx) {
+    return ::mtmd_decode_use_mrope(const_cast<mtmd_context*>(ctx));
+}
+
+#endif // MULTIMODAL_ENABLED

@@ -394,4 +394,174 @@ export default {
         parameters: [],
         result: "bool",
     },
+
+    has_multimodal: {
+        parameters: [],
+        result: "bool",
+    },
+
+    // Multimodal (MTMD) functions - only available if built with MULTIMODAL=ON
+    mtmd_ctx_init: {
+        parameters: [
+            "buffer", // mmproj_path: const char*
+            "pointer", // model: const llama_model*
+            "bool", // use_gpu: bool
+            "i32", // n_threads: int
+            "bool", // warmup: bool
+        ],
+        result: "pointer", // mtmd_context*
+        nonblocking: true,
+        optional: true,
+    },
+
+    mtmd_ctx_free: {
+        parameters: ["pointer"], // ctx: mtmd_context*
+        result: "void",
+        optional: true,
+    },
+
+    mtmd_ctx_supports_vision: {
+        parameters: ["pointer"], // ctx: const mtmd_context*
+        result: "bool",
+        optional: true,
+    },
+
+    mtmd_ctx_supports_audio: {
+        parameters: ["pointer"], // ctx: const mtmd_context*
+        result: "bool",
+        optional: true,
+    },
+
+    mtmd_get_default_marker: {
+        parameters: [],
+        result: "pointer", // const char*
+        optional: true,
+    },
+
+    mtmd_bitmap_create: {
+        parameters: [
+            "u32", // width: uint32_t
+            "u32", // height: uint32_t
+            "buffer", // rgb_data: const unsigned char*
+        ],
+        result: "pointer", // mtmd_bitmap*
+        optional: true,
+    },
+
+    mtmd_bitmap_from_bytes: {
+        parameters: [
+            "buffer", // data: const unsigned char*
+            "usize", // data_length: size_t
+        ],
+        result: "pointer", // mtmd_bitmap*
+        optional: true,
+    },
+
+    mtmd_bitmap_destroy: {
+        parameters: ["pointer"], // bitmap: mtmd_bitmap*
+        result: "void",
+        optional: true,
+    },
+
+    mtmd_bitmap_get_width: {
+        parameters: ["pointer"], // bitmap: const mtmd_bitmap*
+        result: "u32", // uint32_t
+        optional: true,
+    },
+
+    mtmd_bitmap_get_height: {
+        parameters: ["pointer"], // bitmap: const mtmd_bitmap*
+        result: "u32", // uint32_t
+        optional: true,
+    },
+
+    mtmd_tokenize_with_media: {
+        parameters: [
+            "pointer", // ctx: mtmd_context*
+            "buffer", // text: const char*
+            "bool", // add_special: bool
+            "bool", // parse_special: bool
+            "buffer", // bitmaps: const mtmd_bitmap**
+            "usize", // n_bitmaps: size_t
+        ],
+        result: "pointer", // mtmd_input_chunks*
+        nonblocking: true,
+        optional: true,
+    },
+
+    mtmd_chunks_free: {
+        parameters: ["pointer"], // chunks: mtmd_input_chunks*
+        result: "void",
+        optional: true,
+    },
+
+    mtmd_chunks_size: {
+        parameters: ["pointer"], // chunks: const mtmd_input_chunks*
+        result: "usize", // size_t
+        optional: true,
+    },
+
+    mtmd_chunks_get: {
+        parameters: [
+            "pointer", // chunks: const mtmd_input_chunks*
+            "usize", // idx: size_t
+        ],
+        result: "pointer", // const mtmd_input_chunk*
+        optional: true,
+    },
+
+    mtmd_chunks_get_total_tokens: {
+        parameters: ["pointer"], // chunks: const mtmd_input_chunks*
+        result: "usize", // size_t
+        optional: true,
+    },
+
+    mtmd_chunk_get_type: {
+        parameters: ["pointer"], // chunk: const mtmd_input_chunk*
+        result: "i32", // int (0=text, 1=image, 2=audio)
+        optional: true,
+    },
+
+    mtmd_chunk_get_tokens: {
+        parameters: [
+            "pointer", // chunk: const mtmd_input_chunk*
+            "pointer", // n_tokens_out: size_t*
+        ],
+        result: "pointer", // const int32_t*
+        optional: true,
+    },
+
+    mtmd_chunk_get_n_tokens: {
+        parameters: ["pointer"], // chunk: const mtmd_input_chunk*
+        result: "usize", // size_t
+        optional: true,
+    },
+
+    mtmd_encode_chunk: {
+        parameters: [
+            "pointer", // ctx: mtmd_context*
+            "pointer", // chunk: const mtmd_input_chunk*
+        ],
+        result: "i32", // int32_t
+        nonblocking: true,
+        optional: true,
+    },
+
+    mtmd_get_output_embd: {
+        parameters: ["pointer"], // ctx: mtmd_context*
+        result: "pointer", // float*
+        optional: true,
+    },
+
+    mtmd_decode_use_non_causal: {
+        parameters: ["pointer"], // ctx: const mtmd_context*
+        result: "bool",
+        optional: true,
+    },
+
+    mtmd_decode_use_mrope: {
+        parameters: ["pointer"], // ctx: const mtmd_context*
+        result: "bool",
+        optional: true,
+    },
 } as const;
