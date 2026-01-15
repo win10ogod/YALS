@@ -1,6 +1,7 @@
 import { SSEStreamingApi } from "hono/streaming";
 import { HTTPException } from "hono/http-exception";
 import { Queue } from "@core/asyncutil";
+import * as z from "@/common/myZod.ts";
 
 import {
     AnthropicContentBlock,
@@ -34,12 +35,16 @@ import { logger } from "@/common/logging.ts";
 import { OAIContext } from "@/api/OAI/types/context.ts";
 import { FinishChunk, GenerationChunk } from "@/bindings/types.ts";
 
-const STOP_REASON_MAP: Record<string, AnthropicMessagesResponse["stop_reason"]> =
-    {
-        stop: "end_turn",
-        length: "max_tokens",
-        tool_calls: "tool_use",
-    };
+type AnthropicStopReason = "end_turn" | "max_tokens" | "stop_sequence" | "tool_use";
+type AnthropicMessagesResponseType = z.infer<typeof AnthropicMessagesResponse>;
+type AnthropicContentBlockType = z.infer<typeof AnthropicContentBlock>;
+type ChatCompletionResponseType = z.infer<typeof ChatCompletionResponse>;
+
+const STOP_REASON_MAP: Record<string, AnthropicStopReason> = {
+    stop: "end_turn",
+    length: "max_tokens",
+    tool_calls: "tool_use",
+};
 
 function convertAnthropicToOpenAI(
     request: AnthropicMessagesRequest,
@@ -51,6 +56,8 @@ function convertAnthropicToOpenAI(
             openaiMessages.push({
                 role: "system",
                 content: request.system,
+                tool_calls: undefined,
+                tool_call_id: undefined,
             });
         } else {
             const systemText = request.system
@@ -61,6 +68,8 @@ function convertAnthropicToOpenAI(
                 openaiMessages.push({
                     role: "system",
                     content: systemText,
+                    tool_calls: undefined,
+                    tool_call_id: undefined,
                 });
             }
         }
@@ -70,6 +79,8 @@ function convertAnthropicToOpenAI(
         const openaiMessage: ChatCompletionMessage = {
             role: msg.role,
             content: "",
+            tool_calls: undefined,
+            tool_call_id: undefined,
         };
 
         if (typeof msg.content === "string") {
@@ -87,6 +98,7 @@ function convertAnthropicToOpenAI(
                 contentParts.push({
                     type: "text",
                     text: block.text,
+                    image_url: undefined,
                 });
                 continue;
             }
@@ -98,15 +110,21 @@ function convertAnthropicToOpenAI(
                     const data = String(source.data ?? "");
                     contentParts.push({
                         type: "image_url",
+                        text: undefined,
                         image_url: {
                             url: `data:${mediaType};base64,${data}`,
+                            detail: undefined,
                         },
                     });
                 } else if (source.type === "url") {
                     const url = String(source.url ?? "");
                     contentParts.push({
                         type: "image_url",
-                        image_url: { url },
+                        text: undefined,
+                        image_url: {
+                            url,
+                            detail: undefined,
+                        },
                     });
                 }
                 continue;
@@ -130,11 +148,13 @@ function convertAnthropicToOpenAI(
                         role: "tool",
                         tool_call_id: block.tool_use_id ?? block.id ?? "",
                         content: block.content ? String(block.content) : "",
+                        tool_calls: undefined,
                     });
                 } else {
                     contentParts.push({
                         type: "text",
                         text: block.content ? String(block.content) : "",
+                        image_url: undefined,
                     });
                 }
             }
@@ -166,7 +186,7 @@ function convertAnthropicToOpenAI(
         type: "function",
         function: {
             name: tool.name,
-            description: tool.description,
+            description: tool.description ?? "",
             parameters: tool.input_schema,
         },
     }));
@@ -187,13 +207,16 @@ function convertAnthropicToOpenAI(
 }
 
 function convertOpenAIResponse(
-    response: ChatCompletionResponse,
-): AnthropicMessagesResponse {
+    response: ChatCompletionResponseType,
+): AnthropicMessagesResponseType {
     const choice = response.choices[0];
-    const content: AnthropicContentBlock[] = [
+    const contentText = typeof choice.message.content === "string"
+        ? choice.message.content
+        : "";
+    const content: AnthropicContentBlockType[] = [
         AnthropicContentBlock.parse({
             type: "text",
-            text: choice.message.content ?? "",
+            text: contentText,
         }),
     ];
 
@@ -472,11 +495,12 @@ export async function streamAnthropicMessages(
 
         if (toolCalls.length > 0) {
             for (const toolCall of toolCalls) {
-                let inputJson = toolCall.function.arguments ?? "{}";
-                try {
-                    JSON.parse(inputJson);
-                } catch {
-                    inputJson = "{}";
+                const args = toolCall.function.arguments;
+                let inputJson = "{}";
+                if (typeof args === "string") {
+                    inputJson = args;
+                } else if (args && typeof args === "object") {
+                    inputJson = JSON.stringify(args);
                 }
 
                 await writeEvent(

@@ -43,14 +43,22 @@ export function pointerArrayFromBuffers(buffers: Uint8Array[]): {
 } {
     const pointers = new BigUint64Array(buffers.length);
     const sizes = new BigUint64Array(buffers.length);
+    const ownedBuffers: Uint8Array[] = [];
 
     buffers.forEach((buffer, index) => {
-        const ptr = buffer.byteLength > 0 ? Deno.UnsafePointer.of(buffer) : null;
+        const view: Uint8Array<ArrayBuffer> = buffer.buffer instanceof ArrayBuffer
+            ? buffer as Uint8Array<ArrayBuffer>
+            : new Uint8Array(buffer);
+        ownedBuffers.push(view);
+
+        const ptr = view.byteLength > 0
+            ? Deno.UnsafePointer.of(view)
+            : null;
         pointers[index] = ptr ? BigInt(Deno.UnsafePointer.value(ptr)) : 0n;
-        sizes[index] = BigInt(buffer.byteLength);
+        sizes[index] = BigInt(view.byteLength);
     });
 
-    return { pointers, sizes, buffers };
+    return { pointers, sizes, buffers: ownedBuffers };
 }
 
 export function adjustCacheSize(cacheSize: number, maxSeqLen: number) {

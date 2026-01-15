@@ -810,7 +810,7 @@ export class Model {
                 promptPtr,
                 media.pointers,
                 media.sizes,
-                media.pointers.length,
+                BigInt(media.pointers.length),
                 genResources.rawPtr,
                 maxTokens,
                 params.min_tokens,
