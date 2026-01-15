@@ -222,12 +222,23 @@ function convertOpenAIResponse(
 
     if (choice.message.tool_calls) {
         for (const toolCall of choice.message.tool_calls) {
+            const args = toolCall.function.arguments;
+            let input: Record<string, unknown> = {};
+            if (typeof args === "string") {
+                try {
+                    input = JSON.parse(args);
+                } catch {
+                    input = {};
+                }
+            } else if (args && typeof args === "object") {
+                input = args as Record<string, unknown>;
+            }
             content.push(
                 AnthropicContentBlock.parse({
                     type: "tool_use",
                     id: toolCall.id,
                     name: toolCall.function.name,
-                    input: JSON.parse(toolCall.function.arguments),
+                    input,
                 }),
             );
         }
