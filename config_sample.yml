@@ -94,6 +94,9 @@ model:
   num_threads: -1
 
   # Prompt template to use for chat completions (default: None)
+  # Example: chatml (loads templates/chatml.jinja)
+  # If you see template tokens in responses, set this explicitly to the
+  # correct template for the model.
   prompt_template:
   # Optional template kwargs passed into the chat template (default: {})
   # Example (disable chain-of-thought tags for supported templates):
@@ -101,6 +104,7 @@ model:
   #   enable_thinking: false
   # If you provide a custom prompt_template and need a tool-use variant,
   # place a file named "<prompt_template>_tool_use.jinja" in templates/.
+  # Example: templates/chatml_tool_use.jinja
   chat_template_kwargs: {}
 
   # Multimodal projector file (for vision models). Leave empty to disable (default: None)
