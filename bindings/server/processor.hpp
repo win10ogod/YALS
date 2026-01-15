@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <thread>
+#include <algorithm>
 
 #include "inference_args.hpp"
 #include "llama.h"
@@ -108,6 +109,108 @@ class Processor {
         return 0;
     }
 
+    bool maybe_shift_context(Slot& slot, const int n_past) const {
+        if (!slot.ctx_shift || slot.has_mtmd) {
+            return false;
+        }
+
+        if (!llama_memory_can_shift(mem)) {
+            return false;
+        }
+
+        const int n_ctx = std::min<int>(
+            static_cast<int>(slot.n_ctx_max),
+            static_cast<int>(llama_n_ctx(ctx)));
+        if (n_ctx <= 4) {
+            return false;
+        }
+
+        int n_keep = slot.n_keep;
+        if (n_keep < 0) {
+            n_keep = static_cast<int>(slot.prompt_tokens.size());
+        }
+
+        if (slot.add_special) {
+            n_keep += 1;
+        }
+
+        n_keep = std::max(0, std::min(n_keep, n_ctx - 4));
+
+        const int n_left = n_past - n_keep;
+        if (n_left <= 0) {
+            return false;
+        }
+
+        int n_discard = slot.n_discard > 0 ? slot.n_discard : (n_left / 2);
+        if (n_discard <= 0) {
+            return false;
+        }
+
+        if (n_discard > n_left) {
+            n_discard = n_left;
+        }
+
+        llama_memory_seq_rm(mem, slot.slot_id, n_keep, n_keep + n_discard);
+        llama_memory_seq_add(mem, slot.slot_id, n_keep + n_discard, n_past, -n_discard);
+
+        slot.n_past = n_past - n_discard;
+        if (!slot.prompt_tokens.empty()) {
+            const size_t keep = static_cast<size_t>(n_keep);
+            if (keep < slot.prompt_tokens.size()) {
+                const size_t erase_end = std::min(slot.prompt_tokens.size(), keep + static_cast<size_t>(n_discard));
+                slot.prompt_tokens.erase(slot.prompt_tokens.begin() + keep, slot.prompt_tokens.begin() + erase_end);
+            }
+        }
+        if (slot.prompt_tokens_processed > slot.prompt_tokens.size()) {
+            slot.prompt_tokens_processed = slot.prompt_tokens.size();
+        }
+        slot.rewind_snapshot = Slot::SlotSnapshot::snapshot_slot(slot, mem, false);
+        return true;
+    }
+
+    bool maybe_self_extend(Slot& slot, int n_past) const {
+        if (slot.has_mtmd) {
+            return false;
+        }
+
+        if (!llama_memory_can_shift(mem)) {
+            return false;
+        }
+
+        const int ga_n = slot.grp_attn_n;
+        const int ga_w = slot.grp_attn_w;
+        if (ga_n <= 1 || ga_w <= 0 || (ga_w % ga_n) != 0) {
+            return false;
+        }
+
+        int ga_i = slot.ga_i;
+        bool shifted = false;
+
+        while (n_past >= ga_i + ga_w) {
+            const int ib = (ga_n * ga_i) / ga_w;
+            const int bd = (ga_w / ga_n) * (ga_n - 1);
+            const int dd = (ga_w / ga_n) - ib * bd - ga_w;
+
+            llama_memory_seq_add(mem, slot.slot_id, ga_i, n_past, ib * bd);
+            llama_memory_seq_div(mem, slot.slot_id, ga_i + ib * bd, ga_i + ib * bd + ga_w, ga_n);
+            llama_memory_seq_add(mem, slot.slot_id, ga_i + ib * bd + ga_w, n_past + ib * bd, dd);
+
+            n_past -= bd;
+            ga_i += ga_w / ga_n;
+            shifted = true;
+        }
+
+        if (!shifted) {
+            return false;
+        }
+
+        slot.ga_i = ga_i;
+        slot.n_past = n_past;
+        slot.self_extend_used = true;
+        slot.rewind_snapshot = Slot::SlotSnapshot::snapshot_slot(slot, mem, false);
+        return true;
+    }
+
     // nearly eq to common_add_to_batch from lcpp server
     void add_to_batch(Slot& slot, const llama_token token, const bool compute_logits) {
         slot.i_batch = batch.n_tokens;
@@ -168,14 +271,34 @@ class Processor {
         queue_tasks.pop();
         lock.unlock();
 
-        // Prompt + max tokens to gen is longer than the entire ctx length.
+        const uint32_t ctx_limit = std::min<uint32_t>(
+            static_cast<uint32_t>(llama_n_ctx(ctx)),
+            req.inference_args.max_slot_n_ctx);
+        if (ctx_limit == 0) {
+            readback_finish(req.inference_args.gen_resources->readback_buffer, make_empty_json_status_string("CtxExceeded", "None"));
+            return;
+        }
+
         const auto prompt_positions = req.has_mtmd
             ? req.prompt_n_pos
             : static_cast<llama_pos>(req.prompt_tokens.size());
-        const auto total_tokens = prompt_positions + req.inference_args.max_tokens_to_gen;
-        if (total_tokens > llama_n_ctx(ctx) || total_tokens > req.inference_args.max_slot_n_ctx) {
+        if (prompt_positions > static_cast<llama_pos>(ctx_limit)) {
             readback_finish(req.inference_args.gen_resources->readback_buffer, make_empty_json_status_string("CtxExceeded", "None"));
             return;
+        }
+
+        const bool can_shift = req.inference_args.ctx_shift && !req.has_mtmd && llama_memory_can_shift(mem);
+        const bool can_self_extend = req.inference_args.grp_attn_n > 1 &&
+            req.inference_args.grp_attn_w > 0 &&
+            (req.inference_args.grp_attn_w % req.inference_args.grp_attn_n) == 0 &&
+            !req.has_mtmd &&
+            llama_memory_can_shift(mem);
+        if (!can_shift && !can_self_extend) {
+            const auto total_tokens = prompt_positions + req.inference_args.max_tokens_to_gen;
+            if (total_tokens > static_cast<llama_pos>(ctx_limit)) {
+                readback_finish(req.inference_args.gen_resources->readback_buffer, make_empty_json_status_string("CtxExceeded", "None"));
+                return;
+            }
         }
 
         //Check for the best slot. The best slot is the one with the longest prefix.
@@ -231,6 +354,15 @@ class Processor {
 
         best_slot->request_id = req.id;
         best_slot->prompt_tokens = req.prompt_tokens;
+        best_slot->has_mtmd = req.has_mtmd;
+        best_slot->n_keep = req.inference_args.n_keep;
+        best_slot->n_discard = req.inference_args.n_discard;
+        best_slot->grp_attn_n = req.inference_args.grp_attn_n;
+        best_slot->grp_attn_w = req.inference_args.grp_attn_w;
+        best_slot->ctx_shift = req.inference_args.ctx_shift;
+        best_slot->add_special = req.inference_args.add_special;
+        best_slot->ga_i = 0;
+        best_slot->self_extend_used = false;
 
         if (best_slot->gen_resources) {
             generation_resources_release(best_slot->gen_resources);
@@ -326,10 +458,39 @@ class Processor {
             stop_token = common_token_to_piece(ctx, token, true);
         }
 
-        if (llama_memory_seq_pos_max(mem, slot.slot_id) >= slot.n_ctx_max || llama_memory_seq_pos_max(mem, slot.slot_id) >= llama_n_ctx(ctx)) {
-            is_complete = true;
-            finish_reason = "CtxExceeded";
-            stop_token = common_token_to_piece(ctx, token, true);
+        if (!is_eos) {
+            const llama_pos pos_max = llama_memory_seq_pos_max(mem, slot.slot_id);
+            if (pos_max >= 0) {
+                const int n_ctx = std::min<int>(
+                    static_cast<int>(slot.n_ctx_max),
+                    static_cast<int>(llama_n_ctx(ctx)));
+                const int n_past = static_cast<int>(pos_max) + 1;
+
+                bool self_extend_applied = false;
+                const bool self_extend_enabled = !slot.has_mtmd &&
+                    slot.grp_attn_n > 1 &&
+                    slot.grp_attn_w > 0 &&
+                    (slot.grp_attn_w % slot.grp_attn_n) == 0;
+                if (self_extend_enabled) {
+                    self_extend_applied = maybe_self_extend(slot, n_past);
+                }
+
+                if (n_ctx > 0 && pos_max >= n_ctx - 1) {
+                    llama_pos pos_after = pos_max;
+                    if (self_extend_applied) {
+                        pos_after = llama_memory_seq_pos_max(mem, slot.slot_id);
+                    }
+
+                    if (pos_after >= n_ctx - 1) {
+                        const int shift_past = static_cast<int>(pos_after) + 1;
+                        if (!maybe_shift_context(slot, shift_past)) {
+                            is_complete = true;
+                            finish_reason = "CtxExceeded";
+                            stop_token = common_token_to_piece(ctx, token, true);
+                        }
+                    }
+                }
+            }
         }
 
         const auto seq_res = slot.sequence_stream->append(piece);

@@ -20,6 +20,26 @@ const GenerationOptionsSchema = z.aliasedObject(
             .samplerOverride("stop")
             .coalesce([])
             .describe("Aliases: stop_sequence"),
+        ctx_shift: z.boolean().nullish()
+            .samplerOverride("ctx_shift")
+            .coalesce(false)
+            .describe("Enable llama.cpp native context shift"),
+        n_keep: z.number().gte(-1).nullish()
+            .samplerOverride("n_keep")
+            .coalesce(0)
+            .describe("Tokens to keep from the initial prompt (-1 = all)"),
+        n_discard: z.number().gte(0).nullish()
+            .samplerOverride("n_discard")
+            .coalesce(0)
+            .describe("Tokens to discard after n_keep when shifting"),
+        grp_attn_n: z.number().gte(1).nullish()
+            .samplerOverride("grp_attn_n")
+            .coalesce(1)
+            .describe("Self-Extend group attention factor"),
+        grp_attn_w: z.number().gte(1).nullish()
+            .samplerOverride("grp_attn_w")
+            .coalesce(512)
+            .describe("Self-Extend group attention width"),
         add_bos_token: z.boolean().nullish()
             .samplerOverride("add_bos_token"),
         ban_eos_token: z.boolean().nullish()

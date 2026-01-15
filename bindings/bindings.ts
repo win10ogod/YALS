@@ -614,6 +614,17 @@ export class Model {
         // Fallback to the model's preference
         // Ideally, this shouldn't be exposed, but frontends want it.
         const addBosToken = params.add_bos_token ?? this.tokenizer.addBosToken;
+        const ctxShift = params.ctx_shift ?? false;
+        const grpAttnN = params.grp_attn_n ?? 1;
+        const grpAttnW = params.grp_attn_w ?? 512;
+
+        if (grpAttnN > 1) {
+            if (grpAttnW <= 0 || grpAttnW % grpAttnN !== 0) {
+                throw new Error(
+                    "grp_attn_w must be a positive multiple of grp_attn_n.",
+                );
+            }
+        }
 
         const hasMultimodal = !!(multimodalData && multimodalData.length > 0);
         let maxTokens = params.max_tokens;
@@ -635,7 +646,9 @@ export class Model {
             const availableTokens = this.maxSeqLen - promptTokens.length;
             maxTokens = params.max_tokens === 0 ? availableTokens : params.max_tokens;
 
-            if (promptTokens.length + maxTokens > this.maxSeqLen) {
+            const allowContextOverflow = ctxShift || grpAttnN > 1;
+            if (!allowContextOverflow &&
+                promptTokens.length + maxTokens > this.maxSeqLen) {
                 throw new Error(
                     `Prompt (${promptTokens.length} tokens) + max_tokens (${maxTokens} tokens) ` +
                         `exceeds max context length of ${this.maxSeqLen} tokens`,
@@ -816,6 +829,11 @@ export class Model {
                 params.min_tokens,
                 this.maxSeqLen,
                 seed,
+                params.n_keep ?? 0,
+                params.n_discard ?? 0,
+                grpAttnN,
+                grpAttnW,
+                ctxShift,
                 rewindPtrArray.inner,
                 params.banned_strings.length,
                 stopStringsPtr.inner,
@@ -833,6 +851,11 @@ export class Model {
                 params.min_tokens,
                 this.maxSeqLen,
                 seed,
+                params.n_keep ?? 0,
+                params.n_discard ?? 0,
+                grpAttnN,
+                grpAttnW,
+                ctxShift,
                 rewindPtrArray.inner,
                 params.banned_strings.length,
                 stopStringsPtr.inner,

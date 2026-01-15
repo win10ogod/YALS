@@ -30,6 +30,8 @@ struct Slot {
         int n_past{};
         int i_batch{};
         llama_token last_token{};
+        int ga_i{};
+        bool self_extend_used{};
         std::string previous_seq_stream_buffer;
         int32_t previous_kv_pos{};
 
@@ -40,6 +42,8 @@ struct Slot {
             snapshot.n_past = slot.n_past;
             snapshot.i_batch = slot.i_batch;
             snapshot.last_token = slot.last_token;
+            snapshot.ga_i = slot.ga_i;
+            snapshot.self_extend_used = slot.self_extend_used;
             snapshot.previous_seq_stream_buffer = slot.sequence_stream->sequence_buffer;
 
             // During the prompt because we do not call decode, we need a special case to update the kv pos for prompt
@@ -53,6 +57,8 @@ struct Slot {
             slot.n_past = n_past;
             slot.i_batch = i_batch;
             slot.last_token = last_token;
+            slot.ga_i = ga_i;
+            slot.self_extend_used = self_extend_used;
             slot.sequence_stream->sequence_buffer = previous_seq_stream_buffer;
             return previous_kv_pos;
         }
@@ -63,6 +69,14 @@ struct Slot {
     int slot_id{0};
     uint32_t n_ctx_max{0};
     State state = State::IDLE;
+    int n_keep{0};
+    int n_discard{0};
+    int grp_attn_n{1};
+    int grp_attn_w{512};
+    int ga_i{0};
+    bool ctx_shift{false};
+    bool add_special{true};
+    bool self_extend_used{false};
 
     std::vector<llama_token> prompt_tokens;
     size_t prompt_tokens_processed{0};
@@ -90,6 +104,7 @@ struct Slot {
     class RuleStream* rule_stream{nullptr};
 
     bool cancelled{false};
+    bool has_mtmd{false};
 
     explicit Slot(const llama_model* model, llama_context* ctx): presampler() {
         detokenizer = new TokenStreamDetokenizer(ctx);
@@ -107,6 +122,9 @@ struct Slot {
     [[nodiscard]] bool is_generating() const { return state == State::GENERATING; }
 
     void clear() {
+        if (self_extend_used) {
+            prompt_tokens.clear();
+        }
         request_id = -1;
         state = State::IDLE;
         prompt_tokens_processed = 0;
@@ -121,6 +139,15 @@ struct Slot {
         detokenizer->reset();
         presampler.reset();
         cancelled = false;
+        has_mtmd = false;
+        n_keep = 0;
+        n_discard = 0;
+        grp_attn_n = 1;
+        grp_attn_w = 512;
+        ga_i = 0;
+        ctx_shift = false;
+        add_special = true;
+        self_extend_used = false;
     }
 
     State previous_state{State::IDLE};

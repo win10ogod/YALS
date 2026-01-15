@@ -21,6 +21,11 @@ public:
     int min_tokens_to_gen;
     uint32_t max_slot_n_ctx;
     unsigned seed;
+    int n_keep;
+    int n_discard;
+    int grp_attn_n;
+    int grp_attn_w;
+    bool ctx_shift;
     std::vector<std::string> rewind_strings;
     std::vector<std::string> stopping_strings;
     std::vector<int32_t> stopping_tokens;
@@ -28,7 +33,8 @@ public:
 
     InferenceArgs(): gen_resources(nullptr), max_tokens_to_gen(0), min_tokens_to_gen(0),
                      max_slot_n_ctx(std::numeric_limits<uint32_t>::max()), seed(0),
-                     add_special(true) {
+                     n_keep(0), n_discard(0), grp_attn_n(1), grp_attn_w(512),
+                     ctx_shift(false), add_special(true) {
     };
 
     explicit InferenceArgs(
@@ -37,6 +43,11 @@ public:
         const int min_tokens = 10,
         const uint32_t max_slot_n_ctx = std::numeric_limits<uint32_t>::max(),
         const unsigned seed = 1337,
+        const int n_keep = 0,
+        const int n_discard = 0,
+        const int grp_attn_n = 1,
+        const int grp_attn_w = 512,
+        const bool ctx_shift = false,
         const char** rewind_strings = nullptr,
         const unsigned num_rewind_strings = 0,
         const char** stopping_strings = nullptr,
@@ -49,6 +60,11 @@ public:
         max_tokens_to_gen(max_tokens),
         min_tokens_to_gen(min_tokens),
         seed(seed),
+        n_keep(n_keep),
+        n_discard(n_discard),
+        grp_attn_n(grp_attn_n),
+        grp_attn_w(grp_attn_w),
+        ctx_shift(ctx_shift),
         add_special(add_special)
     {
         if (rewind_strings != nullptr && num_rewind_strings > 0) {

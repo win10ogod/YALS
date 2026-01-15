@@ -40,6 +40,11 @@ export default {
             "i32", // min_tokens: int
             "u32", // max_slot_n_ctx: unsigned
             "u32", // seed: unsigned
+            "i32", // n_keep: int
+            "i32", // n_discard: int
+            "i32", // grp_attn_n: int
+            "i32", // grp_attn_w: int
+            "bool", // ctx_shift: bool
             "buffer", // rewind_strings: const char**
             "u32", // num_rewind_strings: unsigned
             "buffer", // stopping_strings: const char**
@@ -62,6 +67,11 @@ export default {
             "i32", // min_tokens: int
             "u32", // max_slot_n_ctx: unsigned
             "u32", // seed: unsigned
+            "i32", // n_keep: int
+            "i32", // n_discard: int
+            "i32", // grp_attn_n: int
+            "i32", // grp_attn_w: int
+            "bool", // ctx_shift: bool
             "buffer", // rewind_strings: const char**
             "u32", // num_rewind_strings: unsigned
             "buffer", // stopping_strings: const char**
