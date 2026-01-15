@@ -65,6 +65,10 @@ export default {
             "pointer", // ctx: llama_context*
             "pointer", // mem: llama_memory_t
             "i32", // num_processor_slots: int
+            "bool", // ctx_shift: bool
+            "i32", // n_keep: int
+            "i32", // grp_attn_n: int (Self-Extend factor)
+            "i32", // grp_attn_w: int (Self-Extend width)
         ],
         result: "pointer", // Processor*
         nonblocking: true,

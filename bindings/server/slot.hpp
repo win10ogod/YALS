@@ -70,6 +70,7 @@ struct Slot {
 
     int n_past{0};
     int i_batch{-1};
+    int ga_i{0};  // Self-Extend: current group-attention index for this slot
 
     double slot_start_time{0.0};
     double prompt_end_time{0.0};

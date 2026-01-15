@@ -45,6 +45,13 @@ class Processor {
     llama_memory_t mem;
     llama_batch batch{};
     bool abort_inference = false;
+    bool ctx_shift_enabled = false;
+    int ctx_shift_n_keep = 0;  // Number of tokens to keep when shifting (0 = auto)
+
+    // Self-Extend / Group Attention
+    int ga_n = 1;   // group-attention factor (1 = disabled)
+    int ga_w = 512; // group-attention width
+    int ga_i = 0;   // current group-attention index (state)
 
     std::vector<Slot> slots;
     uint32_t batch_size;
@@ -222,7 +229,10 @@ class Processor {
             stop_token = common_token_to_piece(ctx, token, true);
         }
 
-        if (llama_memory_seq_pos_max(mem, slot.slot_id) >= slot.n_ctx_max || llama_memory_seq_pos_max(mem, slot.slot_id) >= llama_n_ctx(ctx)) {
+        // Only end generation on context exceeded if ctx_shift is disabled
+        if (!ctx_shift_enabled &&
+            (llama_memory_seq_pos_max(mem, slot.slot_id) >= slot.n_ctx_max ||
+             llama_memory_seq_pos_max(mem, slot.slot_id) >= llama_n_ctx(ctx))) {
             is_complete = true;
             finish_reason = "CtxExceeded";
             stop_token = common_token_to_piece(ctx, token, true);
@@ -398,7 +408,104 @@ class Processor {
         }
     }
 
+    // Perform context shift for a slot - discard old tokens and shift positions
+    bool try_context_shift(Slot& slot) {
+        if (!ctx_shift_enabled) {
+            return false;
+        }
+
+        const int n_ctx = llama_n_ctx(ctx);
+        const int current_pos = llama_memory_seq_pos_max(mem, slot.slot_id);
+
+        // Check if we're at or near context limit
+        if (current_pos < n_ctx - 1 && current_pos < static_cast<int>(slot.n_ctx_max) - 1) {
+            return false;
+        }
+
+        // Determine n_keep: use configured value or auto-calculate
+        int n_keep;
+        if (ctx_shift_n_keep > 0) {
+            // Use user-configured n_keep (e.g., to preserve system prompt)
+            n_keep = ctx_shift_n_keep;
+        } else {
+            // Auto: keep 1/4 of context or the original prompt size, whichever is smaller
+            n_keep = std::min(n_ctx / 4, static_cast<int>(slot.prompt_tokens.size()));
+        }
+
+        // Ensure n_keep doesn't exceed context size minus some buffer
+        n_keep = std::min(n_ctx - 4, n_keep);
+
+        const int n_left = current_pos - n_keep;
+        const int n_discard = n_left / 2;  // Discard half of the remaining context
+
+        if (n_discard <= 0) {
+            return false; // Nothing to discard
+        }
+
+        // Log the context shift operation
+        // printf("[Context Shift] n_keep=%d, n_left=%d, n_discard=%d, current_pos=%d\n",
+        //        n_keep, n_left, n_discard, current_pos);
+
+        // Remove tokens from KV cache: [n_keep, n_keep + n_discard)
+        llama_memory_seq_rm(mem, slot.slot_id, n_keep, n_keep + n_discard);
+
+        // Shift positions of remaining tokens by -n_discard
+        llama_memory_seq_add(mem, slot.slot_id, n_keep + n_discard, current_pos + 1, -n_discard);
+
+        // Update slot's n_past to reflect the shift
+        slot.n_past -= n_discard;
+
+        return true;
+    }
+
+    // Self-Extend: compress context using group attention instead of discarding
+    // This preserves more information than basic context shift
+    bool try_self_extend(Slot& slot) {
+        if (ga_n <= 1) {
+            return false;  // Self-Extend disabled
+        }
+
+        // Self-Extend works by compressing positions when n_past reaches ga_i + ga_w
+        // This happens incrementally, not waiting for context to be completely full
+        while (slot.n_past >= slot.ga_i + ga_w) {
+            const int ib = (ga_n * slot.ga_i) / ga_w;
+            const int bd = (ga_w / ga_n) * (ga_n - 1);
+            const int dd = (ga_w / ga_n) - ib * bd - ga_w;
+
+            // Log for debugging (uncomment if needed)
+            // printf("[Self-Extend] slot=%d, n_past=%d, ga_i=%d, ib=%d, bd=%d, dd=%d\n",
+            //        slot.slot_id, slot.n_past, slot.ga_i, ib, bd, dd);
+
+            // Shift positions before the window
+            llama_memory_seq_add(mem, slot.slot_id, slot.ga_i, slot.n_past, ib * bd);
+
+            // Divide (compress) positions within the window
+            llama_memory_seq_div(mem, slot.slot_id, slot.ga_i + ib * bd, slot.ga_i + ib * bd + ga_w, ga_n);
+
+            // Shift positions after the window
+            llama_memory_seq_add(mem, slot.slot_id, slot.ga_i + ib * bd + ga_w, slot.n_past + ib * bd, dd);
+
+            // Update state
+            slot.n_past -= bd;
+            slot.ga_i += ga_w / ga_n;
+        }
+
+        return true;
+    }
+
     void update_slots() {
+        // Apply context management before processing
+        for (auto& slot : slots) {
+            if (slot.is_generating()) {
+                // Self-Extend takes priority if enabled (ga_n > 1)
+                if (ga_n > 1) {
+                    try_self_extend(slot);
+                } else {
+                    try_context_shift(slot);
+                }
+            }
+        }
+
         common_batch_clear(batch);
 
         update_batch();
@@ -436,11 +543,18 @@ class Processor {
     }
 
 public:
-    Processor(llama_model* model, llama_context* ctx, llama_memory_t mem, const int num_slots = 4)
-        : model(model), ctx(ctx), mem(mem), tokenizer(model, ctx) {
+    Processor(llama_model* model, llama_context* ctx, llama_memory_t mem, const int num_slots = 4, const bool ctx_shift = false, const int n_keep = 0, const int grp_attn_n = 1, const int grp_attn_w = 512)
+        : model(model), ctx(ctx), mem(mem), ctx_shift_enabled(ctx_shift), ctx_shift_n_keep(n_keep), ga_n(grp_attn_n), ga_w(grp_attn_w), tokenizer(model, ctx) {
 
         batch_size = llama_n_batch(ctx);
         batch = llama_batch_init(static_cast<int32_t>(batch_size), 0, num_slots);
+
+        // Validate Self-Extend parameters
+        if (ga_n > 1) {
+            if (ga_w % ga_n != 0) {
+                printf("[Self-Extend] Warning: grp_attn_w (%d) should be a multiple of grp_attn_n (%d)\n", ga_w, ga_n);
+            }
+        }
 
         slots.reserve(num_slots);
         for (int i = 0; i < num_slots; i++) {

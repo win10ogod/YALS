@@ -69,6 +69,14 @@ export const ModelConfig = z.object({
     n_cpu_moe: z.union([z.number(), z.literal("all")]).cleanOptional(),
     mmap: z.boolean().nullish().coalesce(true),
 
+    // Context shift options
+    ctx_shift: z.boolean().nullish().coalesce(false), // Enable context shifting when context is full
+    n_keep: z.number().nullish().coalesce(0), // Number of tokens to keep from start when shifting (0 = auto)
+
+    // Self-Extend / Group Attention options (alternative to ctx_shift)
+    grp_attn_n: z.number().nullish().coalesce(1), // Group-attention factor (1 = disabled, >1 = enabled)
+    grp_attn_w: z.number().nullish().coalesce(512), // Group-attention width
+
     // Multimodal options
     mmproj_path: z.string().cleanOptional(), // Path to vision projector (mmproj) file
     multimodal_gpu: z.boolean().nullish().coalesce(true), // Use GPU for multimodal encoding

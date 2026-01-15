@@ -135,6 +135,26 @@ model:
   # WARNING: Do not adjust this parameter unless you know what you're doing!
   mmap: true
 
+  # Enable context shifting for infinite text generation (default: false)
+  # When enabled, old tokens are automatically discarded when context is full,
+  # allowing generation to continue indefinitely.
+  # Note: This may affect coherence as context is shifted.
+  ctx_shift: false
+
+  # Number of tokens to keep from the beginning when context shifting (default: 0)
+  # Use this to preserve your system prompt during context shifts.
+  # Set to 0 for auto-calculation (keeps ~1/4 of context or original prompt size)
+  # Example: If your system prompt is ~500 tokens, set n_keep: 500
+  n_keep: 0
+
+  # Self-Extend / Group Attention (alternative to ctx_shift, better quality)
+  # Compresses old context positions instead of discarding tokens.
+  # grp_attn_n > 1 enables Self-Extend and takes priority over ctx_shift.
+  # Example: grp_attn_n=2, grp_attn_w=512 doubles effective context length.
+  # Note: grp_attn_w should be a multiple of grp_attn_n.
+  grp_attn_n: 1    # Group-attention factor (1 = disabled, 2-8 typical)
+  grp_attn_w: 512  # Group-attention width
+
 # Options for Sampling
 sampling:
   # Select a sampler override preset (default: None).

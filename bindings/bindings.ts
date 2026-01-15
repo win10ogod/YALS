@@ -340,6 +340,10 @@ export class Model {
             context,
             cache,
             params.num_slots,
+            params.ctx_shift,
+            params.n_keep,
+            params.grp_attn_n,
+            params.grp_attn_w,
         );
 
         // Adjust the maxSeqLen to be the full context if -1
@@ -401,6 +405,15 @@ export class Model {
                 `max sequence length of ${maxSeqLen}, ` +
                 `and ${params.num_slots} slot(s)`,
         );
+
+        if (params.grp_attn_n > 1) {
+            logger.info(`Self-Extend enabled (grp_attn_n=${params.grp_attn_n}, grp_attn_w=${params.grp_attn_w})`);
+        } else if (params.ctx_shift) {
+            const keepInfo = params.n_keep > 0
+                ? `keeping ${params.n_keep} tokens`
+                : "auto n_keep";
+            logger.info(`Context shifting enabled (${keepInfo})`);
+        }
 
         // Initialize multimodal context if mmproj is specified or auto-detect
         let multimodalContext: MultimodalContext | undefined;

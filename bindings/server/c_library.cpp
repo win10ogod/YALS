@@ -49,8 +49,8 @@ bool processor_cancel_work(Processor* processor, const int request_id_to_cancel)
     return processor->cancel_work(request_id_to_cancel);
 }
 
-Processor* processor_make(llama_model* model, llama_context* ctx, llama_memory_t mem, const int num_processor_slots) {
-    return new Processor(model, ctx, mem, num_processor_slots);
+Processor* processor_make(llama_model* model, llama_context* ctx, llama_memory_t mem, const int num_processor_slots, const bool ctx_shift, const int n_keep, const int grp_attn_n, const int grp_attn_w) {
+    return new Processor(model, ctx, mem, num_processor_slots, ctx_shift, n_keep, grp_attn_n, grp_attn_w);
 }
 
 void processor_free(const Processor* processor) {

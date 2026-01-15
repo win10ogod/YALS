@@ -61,7 +61,11 @@ extern "C" {
         llama_model* model,
         llama_context* ctx,
         llama_memory_t mem,
-        int num_processor_slots);
+        int num_processor_slots,
+        bool ctx_shift,
+        int n_keep,
+        int grp_attn_n,
+        int grp_attn_w);
 
     void processor_free(
         const Processor* processor);
