@@ -35,6 +35,10 @@ extern "C" {
     // LEAKABLE! Ensure you use endpoint_free_string to clean up.
     char* model_chat_template(
         const llama_model* model);
+    // Optional variant (e.g. "tool_use"). Returns null when missing.
+    char* model_chat_template_variant(
+        const llama_model* model,
+        const char* name);
 
     // ~~~ Processor ~~~
 

@@ -45,6 +45,8 @@ export const ModelConfig = z.object({
         .coalesce(GGMLTensorSplitMode.layer),
     num_threads: z.number().nullish().coalesce(-1),
     prompt_template: z.string().cleanOptional(),
+    chat_template_kwargs: z.record(z.string(), z.unknown()).nullish()
+        .coalesce({}),
     mmproj: z.string().cleanOptional(),
     mmproj_use_gpu: z.boolean().nullish().coalesce(true),
     image_min_tokens: z.number().nullish().coalesce(-1),

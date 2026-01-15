@@ -200,7 +200,10 @@ async function buildChatPrompt(
         messages,
         {
             addGenerationPrompt: params.add_generation_prompt,
-            templateVars: params.template_vars,
+            templateVars: {
+                ...ctx.model.chatTemplateKwargs,
+                ...params.template_vars,
+            },
             tools: params.tools,
             responsePrefix: params.response_prefix,
         },

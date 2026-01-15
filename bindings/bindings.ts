@@ -185,6 +185,8 @@ export class Model {
     path: Path.ParsedPath;
     tokenizer: Tokenizer;
     promptTemplate?: PromptTemplate;
+    promptTemplateToolUse?: PromptTemplate;
+    chatTemplateKwargs: Record<string, unknown>;
     supportsVision: boolean;
     mediaMarker: string;
 
@@ -198,6 +200,8 @@ export class Model {
         tokenizer: Tokenizer,
         maxSeqLen: number,
         promptTemplate?: PromptTemplate,
+        promptTemplateToolUse?: PromptTemplate,
+        chatTemplateKwargs: Record<string, unknown> = {},
         supportsVision: boolean = false,
         mediaMarker: string = "<__media__>",
     ) {
@@ -209,6 +213,8 @@ export class Model {
         this.path = path;
         this.tokenizer = tokenizer;
         this.promptTemplate = promptTemplate;
+        this.promptTemplateToolUse = promptTemplateToolUse;
+        this.chatTemplateKwargs = chatTemplateKwargs;
         this.maxSeqLen = maxSeqLen;
         this.supportsVision = supportsVision;
         this.mediaMarker = mediaMarker;
@@ -402,6 +408,7 @@ export class Model {
         ];
 
         let promptTemplate: PromptTemplate | undefined = undefined;
+        let promptTemplateToolUse: PromptTemplate | undefined = undefined;
         if (params.prompt_template) {
             findTemplateFunctions.unshift(
                 () =>
@@ -433,6 +440,52 @@ export class Model {
             logger.info(
                 `Using template "${promptTemplate.name}" for chat completions`,
             );
+            if (params.prompt_template) {
+                try {
+                    const toolTemplatePath =
+                        `templates/${params.prompt_template}_tool_use`;
+                    const fileInfo = await Deno.stat(toolTemplatePath)
+                        .catch(() => null);
+                    if (fileInfo?.isFile) {
+                        promptTemplateToolUse = await PromptTemplate.fromFile(
+                            toolTemplatePath,
+                        );
+                    }
+                } catch (error) {
+                    if (error instanceof Error) {
+                        logger.error(error.stack);
+                        logger.warn(
+                            "Could not load tool-use template from file.",
+                        );
+                    }
+                }
+            } else {
+                try {
+                    promptTemplateToolUse = Model.getChatTemplateVariant(
+                        model,
+                        "tool_use",
+                    );
+                } catch (error) {
+                    if (error instanceof Error) {
+                        logger.debug(error.message);
+                    }
+                }
+            }
+
+            if (
+                promptTemplateToolUse &&
+                promptTemplateToolUse.rawTemplate === promptTemplate.rawTemplate
+            ) {
+                promptTemplateToolUse = undefined;
+            }
+
+            if (promptTemplateToolUse) {
+                logger.info(`Tool-use template:`);
+                console.log(promptTemplateToolUse.rawTemplate);
+                logger.info(
+                    `Using template "${promptTemplateToolUse.name}" for tool calls`,
+                );
+            }
         } else {
             logger.warn(
                 "Could not create a prompt template because of the above errors.\n" +
@@ -459,6 +512,8 @@ export class Model {
             tokenizer,
             maxSeqLen,
             promptTemplate,
+            promptTemplateToolUse,
+            params.chat_template_kwargs ?? {},
             supportsVision,
             mediaMarker,
         );
@@ -929,5 +984,30 @@ export class Model {
         const template: string = cString.getCString();
 
         return new PromptTemplate("from_gguf", template);
+    }
+
+    static getChatTemplateVariant(
+        model: Deno.PointerValue,
+        variant: string,
+    ) {
+        const variantPtr = new TextEncoder().encode(variant + "\0");
+        const templatePtr = lib.symbols.model_chat_template_variant(
+            model,
+            variantPtr,
+        );
+
+        using _ = defer(() => {
+            if (templatePtr) {
+                lib.symbols.endpoint_free_string(templatePtr);
+            }
+        });
+
+        if (templatePtr === null) {
+            throw new Error(`No chat template found for variant "${variant}"`);
+        }
+
+        const cString = new Deno.UnsafePointerView(templatePtr);
+        const template: string = cString.getCString();
+        return new PromptTemplate(`from_gguf_${variant}`, template);
     }
 }

@@ -1,5 +1,6 @@
 #include "c_library.h"
 
+#include <cstring>
 #include <map>
 
 #include "processor.hpp"
@@ -366,25 +367,29 @@ int32_t* endpoint_tokenize(
     return tokenArray;
 }
 
-char* model_chat_template(const llama_model* model) {
-    static auto tokenizerTemplateKey = "tokenizer.chat_template";
-    const int32_t bufSize = llama_model_meta_val_str(model, tokenizerTemplateKey, nullptr, 0) + 1;
-
-    // Return null if template doesn't exist
-    if (bufSize <= 1) {
+static char* duplicate_chat_template(const char* template_src) {
+    if (!template_src) {
         return nullptr;
     }
 
-    const auto buffer = new char[bufSize];
-    llama_model_meta_val_str(model, tokenizerTemplateKey, buffer, bufSize);
-
-    // Additional check to see if the buffer has data
-    if (buffer[0] == '\0') {
-        delete[] buffer;
+    const size_t len = strlen(template_src);
+    if (len == 0) {
         return nullptr;
     }
 
+    auto* buffer = new char[len + 1];
+    memcpy(buffer, template_src, len);
+    buffer[len] = '\0';
     return buffer;
+}
+
+char* model_chat_template(const llama_model* model) {
+    return model_chat_template_variant(model, nullptr);
+}
+
+char* model_chat_template_variant(const llama_model* model, const char* name) {
+    const char* template_src = llama_model_chat_template(model, name);
+    return duplicate_chat_template(template_src);
 }
 
 char* endpoint_detokenize(

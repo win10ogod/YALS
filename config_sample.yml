@@ -95,9 +95,18 @@ model:
 
   # Prompt template to use for chat completions (default: None)
   prompt_template:
+  # Optional template kwargs passed into the chat template (default: {})
+  # Example (disable chain-of-thought tags for supported templates):
+  # chat_template_kwargs:
+  #   enable_thinking: false
+  # If you provide a custom prompt_template and need a tool-use variant,
+  # place a file named "<prompt_template>_tool_use.jinja" in templates/.
+  chat_template_kwargs: {}
 
   # Multimodal projector file (for vision models). Leave empty to disable (default: None)
   mmproj:
+  # Example:
+  # mmproj: models/llava/mmproj.gguf
 
   # Enable GPU for multimodal projector (default: true)
   mmproj_use_gpu: true
@@ -153,6 +162,17 @@ sampling:
   # Find this in the sampler_overrides folder.
   # This overrides default fallbacks for sampler values that are passed to the API.
   override_preset: safe_defaults
+  # Example override preset (sampler_overrides/my_defaults.yml):
+  # ctx_shift:
+  #   override: true
+  # n_keep:
+  #   override: 128
+  # n_discard:
+  #   override: 64
+  # grp_attn_n:
+  #   override: 2
+  # grp_attn_w:
+  #   override: 512
 
 developer:
   # Set process to use a higher priority.

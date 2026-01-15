@@ -29,6 +29,13 @@ export default {
         parameters: ["pointer"], // model: const llama_model*
         result: "pointer", // char*
     },
+    model_chat_template_variant: {
+        parameters: [
+            "pointer", // model: const llama_model*
+            "buffer", // name: const char*
+        ],
+        result: "pointer", // char*
+    },
 
     // Processor functions
     processor_submit_work: {

@@ -87,7 +87,11 @@ router.post(
 
         let promptTemplate: PromptTemplate;
         if (c.var.model.promptTemplate) {
-            promptTemplate = c.var.model.promptTemplate;
+            const toolTemplate = c.var.model.promptTemplateToolUse;
+            promptTemplate =
+                params.tools?.length && toolTemplate
+                    ? toolTemplate
+                    : c.var.model.promptTemplate;
         } else {
             throw new HTTPException(422, {
                 message:

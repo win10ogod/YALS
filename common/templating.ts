@@ -57,7 +57,19 @@ export class PromptTemplate {
     private extractMetadata(template: Template) {
         const metadata: TemplateMetadata = TemplateMetadataSchema.parse({});
 
-        template.parsed.body.forEach((statement) => {
+        const visited = new WeakSet<object>();
+
+        const visitNode = (node: unknown) => {
+            if (!node || typeof node !== "object") {
+                return;
+            }
+
+            if (visited.has(node)) {
+                return;
+            }
+            visited.add(node);
+
+            const statement = node as { type?: string };
             if (statement.type === "Set") {
                 const setStatement = statement as SetStatement;
 
@@ -74,10 +86,20 @@ export class PromptTemplate {
                     let result: unknown;
                     if (setStatement.value.type === "ArrayLiteral") {
                         const arrayValue = setStatement.value as ArrayLiteral;
-                        result = arrayValue.value.map((e) => {
-                            const literalValue = e as Literal<unknown>;
-                            return literalValue.value;
-                        });
+                        result = arrayValue.value
+                            .map((entry) => {
+                                if (
+                                    (entry as Literal<unknown>)?.type
+                                        ?.endsWith?.("Literal")
+                                ) {
+                                    const literalValue = entry as Literal<
+                                        unknown
+                                    >;
+                                    return literalValue.value;
+                                }
+                                return undefined;
+                            })
+                            .filter((entry) => entry !== undefined);
                     } else if (setStatement.value.type.endsWith("Literal")) {
                         const literalValue = setStatement.value as Literal<
                             unknown
@@ -95,6 +117,18 @@ export class PromptTemplate {
                     }
                 }
             }
+
+            for (const value of Object.values(node)) {
+                if (Array.isArray(value)) {
+                    value.forEach(visitNode);
+                } else if (value && typeof value === "object") {
+                    visitNode(value);
+                }
+            }
+        };
+
+        template.parsed.body.forEach((statement) => {
+            visitNode(statement);
         });
 
         return metadata;

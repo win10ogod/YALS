@@ -276,6 +276,7 @@ router.post(
                 {
                     addBosToken: params.add_bos_token,
                     addGenerationPrompt: false,
+                    templateVars: c.var.model.chatTemplateKwargs,
                 },
             );
         } else {
