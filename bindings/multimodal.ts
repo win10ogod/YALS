@@ -123,9 +123,11 @@ export class MultimodalContext {
      * @returns Bitmap pointer or null on failure
      */
     createBitmapFromBytes(imageBytes: Uint8Array): Deno.PointerValue | null {
+        // Ensure we have an ArrayBuffer-backed Uint8Array for FFI compatibility
+        const buffer = new Uint8Array(imageBytes);
         const bitmap = lib.symbols.mtmd_bitmap_from_bytes!(
-            imageBytes,
-            BigInt(imageBytes.length),
+            buffer,
+            BigInt(buffer.length),
         );
 
         if (!bitmap) {
@@ -147,10 +149,12 @@ export class MultimodalContext {
         height: number,
         rgbData: Uint8Array,
     ): Deno.PointerValue | null {
+        // Ensure we have an ArrayBuffer-backed Uint8Array for FFI compatibility
+        const buffer = new Uint8Array(rgbData);
         const bitmap = lib.symbols.mtmd_bitmap_create!(
             width,
             height,
-            rgbData,
+            buffer,
         );
 
         if (!bitmap) {
