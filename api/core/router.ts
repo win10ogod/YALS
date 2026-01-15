@@ -5,6 +5,7 @@ import { validator as sValidator } from "hono-openapi";
 import { AuthPermissionResponse } from "@/api/core/types/auth.ts";
 import { HealthSchema } from "@/api/core/types/health.ts";
 import { applyChatTemplate } from "@/api/OAI/utils/chatCompletion.ts";
+import { normalizeChatMessages } from "@/api/OAI/utils/messages.ts";
 import {
     ModelCard,
     ModelList,
@@ -264,10 +265,14 @@ router.post(
                 });
             }
 
+            const { messages } = await normalizeChatMessages(params.text, {
+                mediaMarker: c.var.model.mediaMarker,
+                decodeImages: false,
+            });
             text = applyChatTemplate(
                 c.var.model,
                 c.var.model.promptTemplate,
-                params.text,
+                messages,
                 {
                     addBosToken: params.add_bos_token,
                     addGenerationPrompt: false,

@@ -43,6 +43,7 @@ export async function staticGenerate(
     genType: GenerationType,
     prompt: string,
     params: CommonCompletionRequest,
+    multimodalData?: Uint8Array[],
 ) {
     const abortController = new AbortController();
     let finished = false;
@@ -72,6 +73,7 @@ export async function staticGenerate(
                 params,
                 abortController.signal,
                 i,
+                multimodalData,
             );
 
             genTasks.push(task);
@@ -103,6 +105,7 @@ export async function streamCollector(
     genAbortSignal: AbortSignal,
     taskIdx: number,
     genQueue: Queue<GenerationChunk | Error>,
+    multimodalData?: Uint8Array[],
 ) {
     try {
         const genRequestId = params.n > 1
@@ -115,6 +118,7 @@ export async function streamCollector(
             params,
             genAbortSignal,
             taskIdx,
+            multimodalData,
         );
 
         for await (const chunk of generator) {

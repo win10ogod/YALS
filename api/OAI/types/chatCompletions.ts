@@ -9,6 +9,7 @@ import { ToolCall, ToolSpec } from "./tools.ts";
 
 const ChatCompletionImageUrl = z.object({
     url: z.string(),
+    detail: z.string().cleanOptional(),
 });
 
 const ChatCompletionMessagePart = z.object({

@@ -96,6 +96,18 @@ model:
   # Prompt template to use for chat completions (default: None)
   prompt_template:
 
+  # Multimodal projector file (for vision models). Leave empty to disable (default: None)
+  mmproj:
+
+  # Enable GPU for multimodal projector (default: true)
+  mmproj_use_gpu: true
+
+  # Minimum image tokens for dynamic-resolution vision models (default: -1 uses model metadata)
+  image_min_tokens: -1
+
+  # Maximum image tokens for dynamic-resolution vision models (default: -1 uses model metadata)
+  image_max_tokens: -1
+
   # Enable flash attention (default: true)
   # Disable if problems arise with the model's architecture
   flash_attention: true

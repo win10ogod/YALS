@@ -19,7 +19,11 @@ import {
     GGMLTensorSplitMode,
     ReadbackFinishChunk,
 } from "./types.ts";
-import { adjustCacheSize, pointerArrayFromStrings } from "./utils.ts";
+import {
+    adjustCacheSize,
+    pointerArrayFromBuffers,
+    pointerArrayFromStrings,
+} from "./utils.ts";
 
 // TODO: Move this somewhere else
 interface LogitBias {
@@ -170,6 +174,7 @@ export class Model {
     private context: Deno.PointerValue;
     private cache: Deno.PointerValue;
     private processor: Deno.PointerValue;
+    private mtmdContext?: Deno.PointerValue;
 
     // Concurrency
     private activeJobIds: Map<string, Job | undefined> = new Map();
@@ -180,25 +185,33 @@ export class Model {
     path: Path.ParsedPath;
     tokenizer: Tokenizer;
     promptTemplate?: PromptTemplate;
+    supportsVision: boolean;
+    mediaMarker: string;
 
     private constructor(
         model: Deno.PointerValue,
         context: Deno.PointerValue,
         cache: Deno.PointerValue,
         processor: Deno.PointerValue,
+        mtmdContext: Deno.PointerValue | undefined,
         path: Path.ParsedPath,
         tokenizer: Tokenizer,
         maxSeqLen: number,
         promptTemplate?: PromptTemplate,
+        supportsVision: boolean = false,
+        mediaMarker: string = "<__media__>",
     ) {
         this.model = model;
         this.context = context;
         this.cache = cache;
         this.processor = processor;
+        this.mtmdContext = mtmdContext;
         this.path = path;
         this.tokenizer = tokenizer;
         this.promptTemplate = promptTemplate;
         this.maxSeqLen = maxSeqLen;
+        this.supportsVision = supportsVision;
+        this.mediaMarker = mediaMarker;
     }
 
     static async init(
@@ -331,10 +344,48 @@ export class Model {
             );
         }
 
+        let mtmdContext: Deno.PointerValue | undefined;
+        let supportsVision = false;
+        let mediaMarker = "<__media__>";
+
+        if (params.mmproj) {
+            const mmprojPath = Path.isAbsolute(params.mmproj)
+                ? params.mmproj
+                : Path.join(params.model_dir, params.mmproj);
+            const mmprojPathPtr = new TextEncoder().encode(mmprojPath + "\0");
+
+            mtmdContext = await lib.symbols.mtmd_init_context(
+                mmprojPathPtr,
+                model,
+                params.num_threads,
+                params.mmproj_use_gpu,
+                params.flash_attention,
+                params.image_min_tokens,
+                params.image_max_tokens,
+            );
+
+            if (!mtmdContext) {
+                throw new Error(
+                    `Failed to load multimodal projector: ${mmprojPath}`,
+                );
+            }
+
+            supportsVision = lib.symbols.mtmd_support_vision_context(
+                mtmdContext,
+            );
+
+            const markerPtr = lib.symbols.mtmd_default_marker_context();
+            if (markerPtr) {
+                const cString = new Deno.UnsafePointerView(markerPtr);
+                mediaMarker = cString.getCString();
+            }
+        }
+
         const processor = await lib.symbols.processor_make(
             model,
             context,
             cache,
+            mtmdContext ?? null,
             params.num_slots,
         );
 
@@ -403,10 +454,13 @@ export class Model {
             context,
             cache,
             processor,
+            mtmdContext,
             parsedModelPath,
             tokenizer,
             maxSeqLen,
             promptTemplate,
+            supportsVision,
+            mediaMarker,
         );
     }
 
@@ -444,9 +498,13 @@ export class Model {
         // Wait for jobs to complete
         await this.waitForJobs(skipWait);
 
-        lib.symbols.model_free(this.model);
-        lib.symbols.ctx_free(this.context);
         lib.symbols.processor_free(this.processor);
+        if (this.mtmdContext) {
+            lib.symbols.mtmd_free_context(this.mtmdContext);
+            this.mtmdContext = undefined;
+        }
+        lib.symbols.ctx_free(this.context);
+        lib.symbols.model_free(this.model);
     }
 
     async generate(
@@ -455,6 +513,7 @@ export class Model {
         params: BaseSamplerRequest,
         abortSignal: AbortSignal,
         taskIdx: number = 0,
+        multimodalData?: Uint8Array[],
     ): Promise<FinishChunk> {
         let result: FinishChunk | undefined;
 
@@ -464,6 +523,7 @@ export class Model {
             params,
             abortSignal,
             taskIdx,
+            multimodalData,
         );
 
         for await (const chunk of generator) {
@@ -542,6 +602,7 @@ export class Model {
         params: BaseSamplerRequest,
         abortSignal: AbortSignal,
         taskIdx: number = 0,
+        multimodalData?: Uint8Array[],
     ): AsyncGenerator<GenerationChunk> {
         // Get out if the model is shutting down
         if (this.closing) {
@@ -554,15 +615,32 @@ export class Model {
         // Ideally, this shouldn't be exposed, but frontends want it.
         const addBosToken = params.add_bos_token ?? this.tokenizer.addBosToken;
 
-        const promptTokens = await this.tokenizer.tokenize(prompt, addBosToken, true);
-        const availableTokens = this.maxSeqLen - promptTokens.length;
-        const maxTokens = params.max_tokens === 0 ? availableTokens : params.max_tokens;
+        const hasMultimodal = !!(multimodalData && multimodalData.length > 0);
+        let maxTokens = params.max_tokens;
 
-        if (promptTokens.length + maxTokens > this.maxSeqLen) {
-            throw new Error(
-                `Prompt (${promptTokens.length} tokens) + max_tokens (${maxTokens} tokens) ` +
-                    `exceeds max context length of ${this.maxSeqLen} tokens`
+        if (hasMultimodal) {
+            if (!this.mtmdContext || !this.supportsVision) {
+                throw new Error(
+                    "Multimodal input requires a vision-capable model.",
+                );
+            }
+
+            maxTokens = params.max_tokens === 0 ? this.maxSeqLen : params.max_tokens;
+        } else {
+            const promptTokens = await this.tokenizer.tokenize(
+                prompt,
+                addBosToken,
+                true,
             );
+            const availableTokens = this.maxSeqLen - promptTokens.length;
+            maxTokens = params.max_tokens === 0 ? availableTokens : params.max_tokens;
+
+            if (promptTokens.length + maxTokens > this.maxSeqLen) {
+                throw new Error(
+                    `Prompt (${promptTokens.length} tokens) + max_tokens (${maxTokens} tokens) ` +
+                        `exceeds max context length of ${this.maxSeqLen} tokens`,
+                );
+            }
         }
 
         // Initialize generation resources
@@ -724,22 +802,50 @@ export class Model {
             );
         }
 
-        const jobId = lib.symbols.processor_submit_work(
-            this.processor,
-            promptPtr,
-            genResources.rawPtr,
-            maxTokens,
-            params.min_tokens,
-            this.maxSeqLen,
-            seed,
-            rewindPtrArray.inner,
-            params.banned_strings.length,
-            stopStringsPtr.inner,
-            stopStrings.length,
-            stopTokensPtr,
-            stopTokens.length,
-            addBosToken,
-        );
+        let jobId: number;
+        if (hasMultimodal) {
+            const media = pointerArrayFromBuffers(multimodalData ?? []);
+            jobId = lib.symbols.processor_submit_work_mtmd(
+                this.processor,
+                promptPtr,
+                media.pointers,
+                media.sizes,
+                media.pointers.length,
+                genResources.rawPtr,
+                maxTokens,
+                params.min_tokens,
+                this.maxSeqLen,
+                seed,
+                rewindPtrArray.inner,
+                params.banned_strings.length,
+                stopStringsPtr.inner,
+                stopStrings.length,
+                stopTokensPtr,
+                stopTokens.length,
+                addBosToken,
+            );
+        } else {
+            jobId = lib.symbols.processor_submit_work(
+                this.processor,
+                promptPtr,
+                genResources.rawPtr,
+                maxTokens,
+                params.min_tokens,
+                this.maxSeqLen,
+                seed,
+                rewindPtrArray.inner,
+                params.banned_strings.length,
+                stopStringsPtr.inner,
+                stopStrings.length,
+                stopTokensPtr,
+                stopTokens.length,
+                addBosToken,
+            );
+        }
+
+        if (jobId < 0) {
+            throw new Error("Failed to start generation request.");
+        }
 
         // Add the new job to active jobs for cancellation if needed
         const job = new Job(

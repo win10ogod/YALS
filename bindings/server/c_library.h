@@ -2,6 +2,7 @@
 #define PROCESSOR_INTERFACE_H
 
 #include "llama.h"
+#include "mtmd.h"
 
 #ifdef __cplusplus
 
@@ -53,6 +54,25 @@ extern "C" {
         const unsigned num_stopping_tokens,
         const bool add_special);
 
+    int processor_submit_work_mtmd(
+        Processor* processor,
+        const char* prompt,
+        const uint8_t** media_buffers,
+        const size_t* media_sizes,
+        size_t media_count,
+        GenerationResources* gen_resources,
+        const int max_tokens,
+        const int min_tokens,
+        const uint32_t max_slot_n_ctx,
+        const unsigned seed,
+        const char** rewind_strings,
+        const unsigned num_rewind_strings,
+        const char** stopping_strings,
+        const unsigned num_stopping_strings,
+        const int32_t* stopping_tokens,
+        const unsigned num_stopping_tokens,
+        const bool add_special);
+
     bool processor_cancel_work(
         Processor* processor,
         int request_id_to_cancel);
@@ -61,6 +81,7 @@ extern "C" {
         llama_model* model,
         llama_context* ctx,
         llama_memory_t mem,
+        mtmd_context* mtmd_ctx,
         int num_processor_slots);
 
     void processor_free(
@@ -272,6 +293,23 @@ extern "C" {
     // ~~~ Features ~~~
 
     bool has_llguidance();
+
+    mtmd_context* mtmd_init_context(
+        const char* mmproj_path,
+        const llama_model* model,
+        int32_t n_threads,
+        bool use_gpu,
+        bool flash_attn,
+        int32_t image_min_tokens,
+        int32_t image_max_tokens);
+
+    void mtmd_free_context(
+        mtmd_context* ctx);
+
+    bool mtmd_support_vision_context(
+        mtmd_context* ctx);
+
+    const char* mtmd_default_marker_context();
 
 #ifdef __cplusplus
 }

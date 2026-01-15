@@ -1,7 +1,7 @@
 #ifndef SAMPLERS_HPP
 #define SAMPLERS_HPP
 
-#include "llama-model.h"
+#include "llama.h"
 #include "sampling.h"
 #include <iostream>
 
@@ -84,30 +84,31 @@ llama_sampler* sampler_xtc(llama_sampler* chain, const float xtc_probability, co
 
 llama_sampler* sampler_grammar(llama_sampler* chain, const llama_model* model, const char* grammar) {
     static constexpr auto root = "root";
-    return add_sampler(chain, llama_sampler_init_grammar(&model->vocab, grammar, root));
+    const auto* vocab = llama_model_get_vocab(model);
+    return add_sampler(chain, llama_sampler_init_grammar(vocab, grammar, root));
 }
 
 llama_sampler* sampler_dry(llama_sampler* chain, const llama_model* model, const float multiplier,
                            const float base, const int32_t allowed_length, const int32_t penalty_last_n,
                            const char** sequence_breakers, const size_t n_breakers) {
     return add_sampler(chain, llama_sampler_init_dry(
-        &model->vocab, llama_model_n_ctx_train(model), multiplier, base, allowed_length,
+        llama_model_get_vocab(model), llama_model_n_ctx_train(model), multiplier, base, allowed_length,
         penalty_last_n, sequence_breakers, n_breakers));
 }
 
 llama_sampler* sampler_infill(llama_sampler* chain, const llama_model* model) {
-    return add_sampler(chain, llama_sampler_init_infill(&model->vocab));
+    return add_sampler(chain, llama_sampler_init_infill(llama_model_get_vocab(model)));
 }
 
 llama_sampler* sampler_logit_bias(llama_sampler* chain, const llama_model* model,
                                   const int32_t n_bias, const llama_logit_bias* logit_bias) {
     return add_sampler(chain, llama_sampler_init_logit_bias(
-        llama_vocab_n_tokens(&model->vocab), n_bias, logit_bias));
+        llama_vocab_n_tokens(llama_model_get_vocab(model)), n_bias, logit_bias));
 }
 
 llama_sampler* sampler_mirostat(llama_sampler* chain, const llama_model* model, const uint32_t seed,
                                 const float tau, const float eta, const int m) {
-    const int n_vocab = llama_vocab_n_tokens(&model->vocab);
+    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
     return add_sampler(chain, llama_sampler_init_mirostat(n_vocab, seed, tau, eta, m));
 }
 

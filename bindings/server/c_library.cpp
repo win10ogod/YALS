@@ -6,6 +6,8 @@
 #include <sstream>
 
 #include "log.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 // Implementation of processor interface functions
 int processor_submit_work(
@@ -45,12 +47,65 @@ int processor_submit_work(
         args);
 }
 
+int processor_submit_work_mtmd(
+    Processor* processor,
+    const char* prompt,
+    const uint8_t** media_buffers,
+    const size_t* media_sizes,
+    const size_t media_count,
+    GenerationResources* gen_resources,
+    const int max_tokens,
+    const int min_tokens,
+    const uint32_t max_slot_n_ctx,
+    const unsigned seed,
+    const char** rewind_strings,
+    const unsigned num_rewind_strings,
+    const char** stopping_strings,
+    const unsigned num_stopping_strings,
+    const int32_t* stopping_tokens,
+    const unsigned num_stopping_tokens,
+    const bool add_special) {
+
+    const std::string prompt_as_string(prompt);
+    const InferenceArgs args(
+        gen_resources,
+        max_tokens,
+        min_tokens,
+        max_slot_n_ctx,
+        seed,
+        rewind_strings,
+        num_rewind_strings,
+        stopping_strings,
+        num_stopping_strings,
+        stopping_tokens,
+        num_stopping_tokens,
+        add_special
+    );
+
+    std::vector<std::vector<uint8_t>> files;
+    files.reserve(media_count);
+    for (size_t i = 0; i < media_count; i++) {
+        const auto* buffer = media_buffers[i];
+        const size_t size = media_sizes[i];
+        if (!buffer || size == 0) {
+            files.emplace_back();
+            continue;
+        }
+        files.emplace_back(buffer, buffer + size);
+    }
+
+    return processor->submit_work_mtmd(
+        prompt_as_string,
+        files,
+        args);
+}
+
 bool processor_cancel_work(Processor* processor, const int request_id_to_cancel) {
     return processor->cancel_work(request_id_to_cancel);
 }
 
-Processor* processor_make(llama_model* model, llama_context* ctx, llama_memory_t mem, const int num_processor_slots) {
-    return new Processor(model, ctx, mem, num_processor_slots);
+Processor* processor_make(llama_model* model, llama_context* ctx, llama_memory_t mem, mtmd_context* mtmd_ctx, const int num_processor_slots) {
+    return new Processor(model, ctx, mem, mtmd_ctx, num_processor_slots);
 }
 
 void processor_free(const Processor* processor) {
@@ -176,22 +231,22 @@ void model_free(llama_model* model)
 
 llama_token model_vocab_bos(const llama_model* model)
 {
-    return llama_vocab_bos(&model->vocab);
+    return llama_vocab_bos(llama_model_get_vocab(model));
 }
 
 llama_token model_vocab_eos(const llama_model* model)
 {
-    return llama_vocab_eos(&model->vocab);
+    return llama_vocab_eos(llama_model_get_vocab(model));
 }
 
 llama_token model_vocab_eot(const llama_model* model)
 {
-    return llama_vocab_eot(&model->vocab);
+    return llama_vocab_eot(llama_model_get_vocab(model));
 }
 
 bool model_vocab_add_bos(const llama_model* model)
 {
-    return llama_vocab_get_add_bos(&model->vocab);
+    return llama_vocab_get_add_bos(llama_model_get_vocab(model));
 }
 
 int32_t model_n_layer(const llama_model* model)
@@ -200,7 +255,7 @@ int32_t model_n_layer(const llama_model* model)
 }
 
 const char* model_vocab_token_to_string(const llama_model* model, const llama_token token) {
-    return llama_vocab_get_text(&model->vocab, token);
+    return llama_vocab_get_text(llama_model_get_vocab(model), token);
 }
 
 llama_context* ctx_make(
@@ -276,12 +331,13 @@ int32_t* endpoint_tokenize(
     const bool parse_special) {
 
     const auto promptLength = static_cast<int32_t>(strlen(prompt));
-    const int n_prompt = -llama_tokenize(&model->vocab, prompt, promptLength,
+    const auto* vocab = llama_model_get_vocab(model);
+    const int n_prompt = -llama_tokenize(vocab, prompt, promptLength,
                                    nullptr, 0, add_special, parse_special);
     const auto tokenArray = new int32_t[n_prompt + 1];
     tokenArray[0] = n_prompt;
 
-    if (llama_tokenize(&model->vocab, prompt, promptLength,
+    if (llama_tokenize(vocab, prompt, promptLength,
     tokenArray + 1, n_prompt + 1,
         add_special, parse_special) < 0) {
         return nullptr;
@@ -319,7 +375,7 @@ char* endpoint_detokenize(
         const bool add_special,
         const bool parse_special) {
     const auto outText = new char[max_text_size];
-    llama_detokenize(&model->vocab, tokens, num_tokens, outText, max_text_size, add_special, parse_special);
+    llama_detokenize(llama_model_get_vocab(model), tokens, num_tokens, outText, max_text_size, add_special, parse_special);
     return outText;
 }
 
@@ -337,4 +393,45 @@ bool has_llguidance() {
     #else
         return false;
     #endif
+}
+
+mtmd_context* mtmd_init_context(
+    const char* mmproj_path,
+    const llama_model* model,
+    const int32_t n_threads,
+    const bool use_gpu,
+    const bool flash_attn,
+    const int32_t image_min_tokens,
+    const int32_t image_max_tokens) {
+    if (mmproj_path == nullptr || model == nullptr) {
+        return nullptr;
+    }
+
+    mtmd_context_params params = mtmd_context_params_default();
+    params.use_gpu = use_gpu;
+    params.print_timings = false;
+    if (n_threads > 0) {
+        params.n_threads = n_threads;
+    }
+    params.flash_attn_type = flash_attn
+        ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+        : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    params.image_min_tokens = image_min_tokens;
+    params.image_max_tokens = image_max_tokens;
+
+    return mtmd_init_from_file(mmproj_path, model, params);
+}
+
+void mtmd_free_context(mtmd_context* ctx) {
+    if (ctx) {
+        mtmd_free(ctx);
+    }
+}
+
+bool mtmd_support_vision_context(mtmd_context* ctx) {
+    return ctx && mtmd_support_vision(ctx);
+}
+
+const char* mtmd_default_marker_context() {
+    return mtmd_default_marker();
 }

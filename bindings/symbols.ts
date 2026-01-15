@@ -50,6 +50,28 @@ export default {
         ],
         result: "i32", // int
     },
+    processor_submit_work_mtmd: {
+        parameters: [
+            "pointer", // processor: Processor*
+            "buffer", // prompt: const char*
+            "buffer", // media_buffers: const uint8_t**
+            "buffer", // media_sizes: const size_t*
+            "usize", // media_count: size_t
+            "pointer", // gen_resources: GenerationResources*
+            "i32", // max_tokens: int
+            "i32", // min_tokens: int
+            "u32", // max_slot_n_ctx: unsigned
+            "u32", // seed: unsigned
+            "buffer", // rewind_strings: const char**
+            "u32", // num_rewind_strings: unsigned
+            "buffer", // stopping_strings: const char**
+            "u32", // num_stopping_strings: unsigned
+            "buffer", // stopping_tokens: const int32_t*
+            "u32", // num_stopping_tokens: unsigned
+            "bool", // add_special: bool
+        ],
+        result: "i32", // int
+    },
 
     processor_cancel_work: {
         parameters: [
@@ -64,6 +86,7 @@ export default {
             "pointer", // model: llama_model*
             "pointer", // ctx: llama_context*
             "pointer", // mem: llama_memory_t
+            "pointer", // mtmd_ctx: mtmd_context*
             "i32", // num_processor_slots: int
         ],
         result: "pointer", // Processor*
@@ -393,5 +416,33 @@ export default {
     has_llguidance: {
         parameters: [],
         result: "bool",
+    },
+    mtmd_init_context: {
+        parameters: [
+            "buffer", // mmproj_path: const char*
+            "pointer", // model: const llama_model*
+            "i32", // n_threads: int32_t
+            "bool", // use_gpu: bool
+            "bool", // flash_attn: bool
+            "i32", // image_min_tokens: int32_t
+            "i32", // image_max_tokens: int32_t
+        ],
+        result: "pointer", // mtmd_context*
+    },
+    mtmd_free_context: {
+        parameters: [
+            "pointer", // mtmd_context*
+        ],
+        result: "void",
+    },
+    mtmd_support_vision_context: {
+        parameters: [
+            "pointer", // mtmd_context*
+        ],
+        result: "bool",
+    },
+    mtmd_default_marker_context: {
+        parameters: [],
+        result: "pointer", // const char*
     },
 } as const;

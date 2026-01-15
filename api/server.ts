@@ -10,6 +10,7 @@ import { config } from "@/common/config.ts";
 import { logger } from "@/common/logging.ts";
 import core from "./core/router.ts";
 import oai from "./OAI/router.ts";
+import anthropic from "./anthropic/router.ts";
 import { generateUuidHex } from "@/common/utils.ts";
 import { ModelNotLoadedError } from "@/common/errors.ts";
 import requestLogMiddleware from "./middleware/requestLogMiddleware.ts";
@@ -34,6 +35,7 @@ export function createApi() {
     // Add routers
     app.route("/", core);
     app.route("/", oai);
+    app.route("/", anthropic);
 
     // OpenAPI documentation
     app.get(

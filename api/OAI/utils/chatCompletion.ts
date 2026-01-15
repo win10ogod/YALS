@@ -15,7 +15,6 @@ import { PromptTemplate } from "@/common/templating.ts";
 
 import {
     ChatCompletionMessage,
-    ChatCompletionMessagePart,
     ChatCompletionRequest,
     ChatCompletionRespChoice,
     ChatCompletionResponse,
@@ -27,6 +26,8 @@ import { logger } from "@/common/logging.ts";
 import { ToolSpec } from "../types/tools.ts";
 import { TOOL_CALL_SCHEMA, ToolCallProcessor } from "./tools.ts";
 import { OAIContext } from "../types/context.ts";
+import { normalizeChatMessages } from "./messages.ts";
+import { HTTPException } from "hono/http-exception";
 
 interface TemplateFormatOptions {
     addBosToken?: boolean;
@@ -128,15 +129,6 @@ export function applyChatTemplate(
         templateVars = {},
     } = options;
 
-    messages.forEach((message) => {
-        if (Array.isArray(message.content)) {
-            const messageParts = message.content as ChatCompletionMessagePart[];
-            message.content = messageParts.find((part) =>
-                part.type === "text"
-            )?.text ?? "";
-        }
-    });
-
     const bosToken = model.tokenizer.bosToken;
     let prompt = promptTemplate.template.render({
         ...templateVars,
@@ -186,6 +178,39 @@ function addTemplateMetadata(
     }
 }
 
+async function buildChatPrompt(
+    ctx: OAIContext,
+    params: ChatCompletionRequest,
+    promptTemplate: PromptTemplate,
+) {
+    const { messages, media } = await normalizeChatMessages(params.messages, {
+        mediaMarker: ctx.model.mediaMarker,
+        decodeImages: true,
+    });
+
+    if (media.length > 0 && !ctx.model.supportsVision) {
+        throw new HTTPException(422, {
+            message: "The current model does not support image inputs.",
+        });
+    }
+
+    const prompt = applyChatTemplate(
+        ctx.model,
+        promptTemplate,
+        messages,
+        {
+            addGenerationPrompt: params.add_generation_prompt,
+            templateVars: params.template_vars,
+            tools: params.tools,
+            responsePrefix: params.response_prefix,
+        },
+    );
+
+    addTemplateMetadata(promptTemplate, params);
+
+    return { prompt, media };
+}
+
 // TODO: Possibly rewrite this to unify with completions
 export async function streamChatCompletion(
     ctx: OAIContext,
@@ -212,19 +237,11 @@ export async function streamChatCompletion(
         }
     });
 
-    const prompt = applyChatTemplate(
-        ctx.model,
+    const { prompt, media } = await buildChatPrompt(
+        ctx,
+        params,
         promptTemplate,
-        params.messages,
-        {
-            addGenerationPrompt: params.add_generation_prompt,
-            templateVars: params.template_vars,
-            tools: params.tools,
-            responsePrefix: params.response_prefix,
-        },
     );
-
-    addTemplateMetadata(promptTemplate, params);
 
     try {
         const queue = new Queue<GenerationChunk | Error>();
@@ -238,6 +255,7 @@ export async function streamChatCompletion(
                 genAbortController.signal,
                 i,
                 queue,
+                media,
             );
 
             genTasks.push(task);
@@ -319,19 +337,11 @@ export async function generateChatCompletion(
 ) {
     logger.info(`Received chat completion request ${ctx.requestId}`);
 
-    const prompt = applyChatTemplate(
-        ctx.model,
+    const { prompt, media } = await buildChatPrompt(
+        ctx,
+        params,
         promptTemplate,
-        params.messages,
-        {
-            addGenerationPrompt: params.add_generation_prompt,
-            templateVars: params.template_vars,
-            tools: params.tools,
-            responsePrefix: params.response_prefix,
-        },
     );
-
-    addTemplateMetadata(promptTemplate, params);
 
     // Handle generation in the common function
     const generations = await staticGenerate(
@@ -339,6 +349,7 @@ export async function generateChatCompletion(
         GenerationType.ChatCompletion,
         prompt,
         params,
+        media,
     );
 
     // Check for tool calls

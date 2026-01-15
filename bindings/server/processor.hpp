@@ -13,6 +13,8 @@
 
 #include "inference_args.hpp"
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #include "tokenization.hpp"
 #include "slot.hpp"
 #include "request.hpp"
@@ -43,6 +45,7 @@ class Processor {
     llama_model* model;
     llama_context* ctx;
     llama_memory_t mem;
+    mtmd_context* mtmd_ctx;
     llama_batch batch{};
     bool abort_inference = false;
 
@@ -57,7 +60,53 @@ class Processor {
     std::atomic<bool> should_exit{false};
 
     std::atomic<int> current_job_index = 0;
+    std::atomic<int> next_request_id = 1;
     Tokenizer tokenizer;
+
+    static llama_token find_last_text_token(const mtmd_input_chunks* chunks) {
+        if (!chunks) {
+            return LLAMA_TOKEN_NULL;
+        }
+
+        for (size_t i = mtmd_input_chunks_size(chunks); i > 0; --i) {
+            const auto* chunk = mtmd_input_chunks_get(chunks, i - 1);
+            if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                continue;
+            }
+
+            size_t n_tokens = 0;
+            const auto* tokens = mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
+            if (tokens && n_tokens > 0) {
+                return tokens[n_tokens - 1];
+            }
+        }
+
+        return LLAMA_TOKEN_NULL;
+    }
+
+    static int last_text_batch_size(const mtmd_input_chunks* chunks, const int32_t n_batch) {
+        if (!chunks || n_batch <= 0) {
+            return 0;
+        }
+
+        for (size_t i = mtmd_input_chunks_size(chunks); i > 0; --i) {
+            const auto* chunk = mtmd_input_chunks_get(chunks, i - 1);
+            if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                continue;
+            }
+
+            size_t n_tokens = 0;
+            mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
+            if (n_tokens == 0) {
+                continue;
+            }
+
+            const int32_t remainder = static_cast<int32_t>(n_tokens % n_batch);
+            return remainder == 0 ? n_batch : remainder;
+        }
+
+        return 0;
+    }
 
     // nearly eq to common_add_to_batch from lcpp server
     void add_to_batch(Slot& slot, const llama_token token, const bool compute_logits) {
@@ -115,17 +164,17 @@ class Processor {
             return;
         }
 
-        const auto [id,
-            prompt_tokens,
-            inference_args] = queue_tasks.front();
-
+        Request req = std::move(queue_tasks.front());
         queue_tasks.pop();
         lock.unlock();
 
         // Prompt + max tokens to gen is longer than the entire ctx length.
-        const auto total_tokens = prompt_tokens.size() + inference_args.max_tokens_to_gen;
-        if (total_tokens > llama_n_ctx(ctx) || total_tokens > inference_args.max_slot_n_ctx) {
-            readback_finish(inference_args.gen_resources->readback_buffer, make_empty_json_status_string("CtxExceeded", "None"));
+        const auto prompt_positions = req.has_mtmd
+            ? req.prompt_n_pos
+            : static_cast<llama_pos>(req.prompt_tokens.size());
+        const auto total_tokens = prompt_positions + req.inference_args.max_tokens_to_gen;
+        if (total_tokens > llama_n_ctx(ctx) || total_tokens > req.inference_args.max_slot_n_ctx) {
+            readback_finish(req.inference_args.gen_resources->readback_buffer, make_empty_json_status_string("CtxExceeded", "None"));
             return;
         }
 
@@ -139,36 +188,38 @@ class Processor {
                     oldest_idle_slot = &slot;
                 }
 
-                const llama_pos prefix_len = common_longest_prefix(prompt_tokens, slot.prompt_tokens);
-                const bool is_better = prefix_len > longest_prefix ||
-                                      (prefix_len == longest_prefix &&
-                                       (!best_slot || slot.job_index < best_slot->job_index));
+                if (!req.has_mtmd) {
+                    const llama_pos prefix_len = common_longest_prefix(req.prompt_tokens, slot.prompt_tokens);
+                    const bool is_better = prefix_len > longest_prefix ||
+                                          (prefix_len == longest_prefix &&
+                                           (!best_slot || slot.job_index < best_slot->job_index));
 
-                if (is_better) {
-                    longest_prefix = prefix_len;
-                    best_slot = &slot;
+                    if (is_better) {
+                        longest_prefix = prefix_len;
+                        best_slot = &slot;
+                    }
                 }
             }
         }
 
         //If we do not have any prefix matches, pick the oldest idle slot.
-        if (longest_prefix == 0) {
+        if (req.has_mtmd || longest_prefix == 0) {
             best_slot = oldest_idle_slot;
         }
 
         if (!best_slot)
             return;
 
-        if (longest_prefix > 0) {
+        if (!req.has_mtmd && longest_prefix > 0) {
             // Reuse prefix, cut the KV to the prefix size and adjust to gen or prompt appropriately.
             llama_memory_seq_rm(mem, best_slot->slot_id, longest_prefix, -1);
 
             best_slot->prompt_tokens_processed = longest_prefix;
             best_slot->n_past = longest_prefix;
-            best_slot->last_token = prompt_tokens[longest_prefix - 1];
+            best_slot->last_token = req.prompt_tokens[longest_prefix - 1];
 
             best_slot->state =
-                longest_prefix == prompt_tokens.size() ?
+                longest_prefix == req.prompt_tokens.size() ?
                 Slot::State::GENERATING :
                 Slot::State::PROMPT;
         } else {
@@ -178,28 +229,81 @@ class Processor {
             best_slot->prompt_tokens.clear();
         }
 
-        best_slot->request_id = id;
-        best_slot->prompt_tokens = prompt_tokens;
+        best_slot->request_id = req.id;
+        best_slot->prompt_tokens = req.prompt_tokens;
 
         if (best_slot->gen_resources) {
             generation_resources_release(best_slot->gen_resources);
         }
-        best_slot->gen_resources = generation_resources_ref_acquire(inference_args.gen_resources);
+        best_slot->gen_resources = generation_resources_ref_acquire(req.inference_args.gen_resources);
 
         best_slot->slot_start_time = readable_ggml_time();
 
-        best_slot->sequence_stream->bind_sequences(inference_args.stopping_strings, inference_args.rewind_strings);
+        best_slot->sequence_stream->bind_sequences(req.inference_args.stopping_strings, req.inference_args.rewind_strings);
         best_slot->rewind_snapshot = Slot::SlotSnapshot::snapshot_slot(*best_slot, mem, false);
 
         best_slot->sampler = best_slot->gen_resources->sampler;
-        best_slot->n_ctx_max = inference_args.max_slot_n_ctx;
+        best_slot->n_ctx_max = req.inference_args.max_slot_n_ctx;
 
-        if (inference_args.min_tokens_to_gen > 0) {
-            RuleEngine::rule_min_tokens(*best_slot->rule_stream, inference_args.min_tokens_to_gen, model, ctx, *best_slot);
+        if (req.inference_args.min_tokens_to_gen > 0) {
+            RuleEngine::rule_min_tokens(*best_slot->rule_stream, req.inference_args.min_tokens_to_gen, model, ctx, *best_slot);
         }
         
-        if (inference_args.max_tokens_to_gen > 0 && inference_args.max_tokens_to_gen >= inference_args.min_tokens_to_gen) {
-            RuleEngine::rule_max_tokens(*best_slot->rule_stream, inference_args.max_tokens_to_gen, model, ctx, *best_slot);
+        if (req.inference_args.max_tokens_to_gen > 0 && req.inference_args.max_tokens_to_gen >= req.inference_args.min_tokens_to_gen) {
+            RuleEngine::rule_max_tokens(*best_slot->rule_stream, req.inference_args.max_tokens_to_gen, model, ctx, *best_slot);
+        }
+
+        if (req.has_mtmd) {
+            if (!mtmd_ctx || !req.mtmd_chunks) {
+                readback_finish(best_slot->gen_resources->readback_buffer, make_empty_json_status_string("TokenEncode", "None"));
+                cleanup_slot(*best_slot);
+                return;
+            }
+
+            llama_pos new_n_past = 0;
+            const int32_t eval_result = mtmd_helper_eval_chunks(
+                mtmd_ctx,
+                ctx,
+                req.mtmd_chunks.get(),
+                0,
+                best_slot->slot_id,
+                static_cast<int32_t>(batch_size),
+                true,
+                &new_n_past);
+
+            if (eval_result != 0) {
+                readback_finish(best_slot->gen_resources->readback_buffer, make_empty_json_status_string("BatchDecode", "None"));
+                cleanup_slot(*best_slot);
+                return;
+            }
+
+            best_slot->prompt_tokens.clear();
+            best_slot->prompt_tokens_processed = req.prompt_tokens_total;
+            best_slot->n_past = static_cast<int>(new_n_past);
+            best_slot->state = Slot::State::GENERATING;
+            best_slot->rewind_snapshot = Slot::SlotSnapshot::snapshot_slot(*best_slot, mem, true);
+
+            const llama_token last_prompt_token = find_last_text_token(req.mtmd_chunks.get());
+            const int last_batch_tokens = last_text_batch_size(req.mtmd_chunks.get(), static_cast<int32_t>(batch_size));
+
+            if (last_prompt_token == LLAMA_TOKEN_NULL || last_batch_tokens <= 0) {
+                readback_finish(best_slot->gen_resources->readback_buffer, make_empty_json_status_string("TokenEncode", "None"));
+                cleanup_slot(*best_slot);
+                return;
+            }
+
+            best_slot->last_token = last_prompt_token;
+            const llama_token token = llama_sampler_sample(best_slot->sampler, ctx, last_batch_tokens - 1);
+            best_slot->last_token = token;
+            best_slot->i_batch = -1;
+
+            if (best_slot->prompt_end_time == 0.0) {
+                best_slot->prompt_end_time = readable_ggml_time();
+            }
+
+            if (const bool continue_gen = process_token(*best_slot, token); !continue_gen) {
+                cleanup_slot(*best_slot);
+            }
         }
     }
 
@@ -436,8 +540,8 @@ class Processor {
     }
 
 public:
-    Processor(llama_model* model, llama_context* ctx, llama_memory_t mem, const int num_slots = 4)
-        : model(model), ctx(ctx), mem(mem), tokenizer(model, ctx) {
+    Processor(llama_model* model, llama_context* ctx, llama_memory_t mem, mtmd_context* mtmd_ctx, const int num_slots = 4)
+        : model(model), ctx(ctx), mem(mem), mtmd_ctx(mtmd_ctx), tokenizer(model, ctx) {
 
         batch_size = llama_n_batch(ctx);
         batch = llama_batch_init(static_cast<int32_t>(batch_size), 0, num_slots);
@@ -486,11 +590,11 @@ public:
                 std::queue<Request> new_queue;
 
                 while (!queue_tasks.empty()) {
-                    Request req = queue_tasks.front();
+                    Request req = std::move(queue_tasks.front());
                     queue_tasks.pop();
 
                     if (req.id != request_id_to_cancel) {
-                        new_queue.push(req);
+                        new_queue.emplace(std::move(req));
                     } else {
                         readback_finish(
                             req.inference_args.gen_resources->readback_buffer,
@@ -549,13 +653,76 @@ public:
 
         // Always encode special tokens
         const std::vector<llama_token>& prompt_tokens = tokenizer.tokenize(prompt, args.add_special, true);
-        static int next_id = 1;
-        const int request_id = next_id++;
+        const int request_id = next_request_id++;
 
         {
-            const Request request{request_id, prompt_tokens, args};
+            Request request;
+            request.id = request_id;
+            request.prompt_tokens = prompt_tokens;
+            request.inference_args = args;
             std::lock_guard lock(mutex_tasks);
-            queue_tasks.push(request);
+            queue_tasks.emplace(std::move(request));
+        }
+
+        cv_tasks.notify_one();
+        return request_id;
+    }
+
+    int submit_work_mtmd(
+        const std::string& prompt,
+        const std::vector<std::vector<uint8_t>>& files,
+        const InferenceArgs& args) {
+
+        if (!mtmd_ctx) {
+            readback_finish(args.gen_resources->readback_buffer, make_empty_json_status_string("TokenEncode", "None"));
+            return -1;
+        }
+
+        mtmd::bitmaps bitmaps;
+        bitmaps.entries.reserve(files.size());
+        for (const auto& file : files) {
+            mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mtmd_ctx, file.data(), file.size()));
+            if (!bmp.ptr) {
+                readback_finish(args.gen_resources->readback_buffer, make_empty_json_status_string("TokenEncode", "None"));
+                return -1;
+            }
+            bitmaps.entries.push_back(std::move(bmp));
+        }
+
+        mtmd_input_text inp_txt = {
+            prompt.c_str(),
+            /* add_special */   args.add_special,
+            /* parse_special */ true,
+        };
+
+        mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+        auto bitmaps_c_ptr = bitmaps.c_ptr();
+        const int32_t tokenized = mtmd_tokenize(
+            mtmd_ctx,
+            chunks,
+            &inp_txt,
+            bitmaps_c_ptr.data(),
+            bitmaps_c_ptr.size());
+
+        if (tokenized != 0) {
+            mtmd_input_chunks_free(chunks);
+            readback_finish(args.gen_resources->readback_buffer, make_empty_json_status_string("TokenEncode", "None"));
+            return -1;
+        }
+
+        const int request_id = next_request_id++;
+
+        {
+            Request request;
+            request.id = request_id;
+            request.mtmd_chunks.reset(chunks);
+            request.prompt_tokens_total = mtmd_helper_get_n_tokens(chunks);
+            request.prompt_n_pos = mtmd_helper_get_n_pos(chunks);
+            request.has_mtmd = true;
+            request.inference_args = args;
+
+            std::lock_guard lock(mutex_tasks);
+            queue_tasks.emplace(std::move(request));
         }
 
         cv_tasks.notify_one();
