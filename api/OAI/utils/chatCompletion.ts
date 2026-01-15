@@ -23,8 +23,12 @@ import {
 } from "../types/chatCompletions.ts";
 import { CancellationError } from "@/common/errors.ts";
 import { logger } from "@/common/logging.ts";
-import { ToolSpec } from "../types/tools.ts";
-import { TOOL_CALL_SCHEMA, ToolCallProcessor } from "./tools.ts";
+import { ToolCall, ToolSpec } from "../types/tools.ts";
+import {
+    createInlineToolCallParser,
+    TOOL_CALL_SCHEMA,
+    ToolCallProcessor,
+} from "./tools.ts";
 import { OAIContext } from "../types/context.ts";
 import { normalizeChatMessages } from "./messages.ts";
 import { HTTPException } from "hono/http-exception";
@@ -38,23 +42,51 @@ interface TemplateFormatOptions {
     responsePrefix?: string;
 }
 
-function createResponse(chunks: FinishChunk[], modelName: string) {
+function createResponse(
+    chunks: FinishChunk[],
+    modelName: string,
+    allowToolParse: boolean,
+) {
     const choices: ChatCompletionRespChoice[] = [];
 
     for (const chunk of chunks) {
-        const message = ChatCompletionMessage.parse({
-            role: "assistant",
-            content: chunk.text,
-        });
+        let content = chunk.text;
+        let toolCalls: ToolCall[] | undefined;
 
         if (chunk.toolCalls) {
-            message.tool_calls = ToolCallProcessor.fromJson(chunk.toolCalls);
+            toolCalls = ToolCallProcessor.fromJson(chunk.toolCalls);
+        } else if (chunk.fullText) {
+            const shouldParseInline = allowToolParse ||
+                chunk.fullText.includes("<tool_call>");
+            if (!shouldParseInline) {
+                // keep content as-is
+            } else {
+                const extracted = ToolCallProcessor.extractFromText(
+                    chunk.fullText,
+                );
+                if (extracted.toolCalls.length > 0) {
+                    toolCalls = extracted.toolCalls;
+                    content = extracted.content;
+                }
+            }
         }
 
+        const message = ChatCompletionMessage.parse({
+            role: "assistant",
+            content: content.length > 0 ? content : undefined,
+        });
+
+        if (toolCalls?.length) {
+            message.tool_calls = toolCalls;
+        }
+
+        const finishReason = toolCalls?.length
+            ? "tool_calls"
+            : convertFinishReason(chunk);
         const choice = ChatCompletionRespChoice.parse({
             index: chunk.taskIdx,
             message: message,
-            finish_reason: convertFinishReason(chunk),
+            finish_reason: finishReason,
         });
 
         choices.push(choice);
@@ -76,14 +108,28 @@ function createStreamChunk(
     chunk: GenerationChunk,
     modelName: string,
     cmplId: string,
+    allowToolParse: boolean,
 ) {
     const message = ChatCompletionMessage.parse({
         role: "assistant",
         content: chunk.text,
     });
 
-    if (chunk.kind === "finish" && chunk.toolCalls) {
-        message.tool_calls = ToolCallProcessor.fromJson(chunk.toolCalls);
+    if (chunk.kind === "finish") {
+        if (chunk.toolCalls) {
+            message.tool_calls = ToolCallProcessor.fromJson(chunk.toolCalls);
+        } else if (chunk.fullText) {
+            const shouldParseInline = allowToolParse ||
+                chunk.fullText.includes("<tool_call>");
+            if (shouldParseInline) {
+                const extracted = ToolCallProcessor.extractFromText(
+                    chunk.fullText,
+                );
+                if (extracted.toolCalls.length > 0) {
+                    message.tool_calls = extracted.toolCalls;
+                }
+            }
+        }
     }
 
     const choice = ChatCompletionStreamChoice.parse({
@@ -92,7 +138,9 @@ function createStreamChunk(
     });
 
     if (chunk.kind === "finish") {
-        choice.finish_reason = convertFinishReason(chunk);
+        choice.finish_reason = message.tool_calls?.length
+            ? "tool_calls"
+            : convertFinishReason(chunk);
     }
 
     const response = ChatCompletionStreamChunk.parse({
@@ -224,6 +272,10 @@ export async function streamChatCompletion(
     logger.info(`Received streaming chat completion request ${ctx.requestId}`);
 
     const toolStart = promptTemplate.metadata.tool_start;
+    const allowToolParse = !!params.tools?.length;
+    const inlineToolParsers = allowToolParse
+        ? new Map<number, ReturnType<typeof createInlineToolCallParser>>()
+        : null;
     const cmplId = `chatcmpl-${crypto.randomUUID().replaceAll("-", "")}`;
     const genAbortController = new AbortController();
     let finished = false;
@@ -279,7 +331,36 @@ export async function streamChatCompletion(
                 throw chunk;
             }
 
+            const inlineToolParser = inlineToolParsers
+                ? inlineToolParsers.get(chunk.taskIdx) ??
+                    createInlineToolCallParser()
+                : null;
+            if (inlineToolParser && inlineToolParsers) {
+                inlineToolParsers.set(chunk.taskIdx, inlineToolParser);
+            }
+
             if (chunk.kind === "finish") {
+                if (inlineToolParser) {
+                    const flushedText = inlineToolParser.flush();
+                    if (flushedText) {
+                        const flushedChunk: GenerationChunk = {
+                            kind: "data",
+                            text: flushedText,
+                            taskIdx: chunk.taskIdx,
+                            requestId: chunk.requestId,
+                        };
+                        const streamChunk = createStreamChunk(
+                            flushedChunk,
+                            ctx.model.path.name,
+                            cmplId,
+                            allowToolParse,
+                        );
+                        await stream.writeSSE({
+                            data: JSON.stringify(streamChunk),
+                        });
+                    }
+                }
+
                 // Handle tools
                 if (toolStart && chunk.stopToken) {
                     await generateToolCalls(
@@ -291,15 +372,46 @@ export async function streamChatCompletion(
                     );
                 }
 
+                if (inlineToolParser && !chunk.toolCalls) {
+                    if (inlineToolParser.toolCalls.length > 0) {
+                        chunk.toolCalls = JSON.stringify(
+                            inlineToolParser.toolCalls,
+                        );
+                    }
+                }
+
+                if (inlineToolParsers) {
+                    inlineToolParsers.delete(chunk.taskIdx);
+                }
+
                 completedTasks++;
             }
 
-            const streamChunk = createStreamChunk(
-                chunk,
-                ctx.model.path.name,
-                cmplId,
-            );
-            await stream.writeSSE({ data: JSON.stringify(streamChunk) });
+            if (chunk.kind === "data" && inlineToolParser) {
+                const filteredText = inlineToolParser.process(chunk.text);
+                if (!filteredText) {
+                    continue;
+                }
+                const filteredChunk: GenerationChunk = {
+                    ...chunk,
+                    text: filteredText,
+                };
+                const streamChunk = createStreamChunk(
+                    filteredChunk,
+                    ctx.model.path.name,
+                    cmplId,
+                    allowToolParse,
+                );
+                await stream.writeSSE({ data: JSON.stringify(streamChunk) });
+            } else {
+                const streamChunk = createStreamChunk(
+                    chunk,
+                    ctx.model.path.name,
+                    cmplId,
+                    allowToolParse,
+                );
+                await stream.writeSSE({ data: JSON.stringify(streamChunk) });
+            }
 
             // TODO: Make usage aggregated
             if (completedTasks === params.n && queue.size === 0) {
@@ -345,6 +457,7 @@ export async function generateChatCompletion(
         params,
         promptTemplate,
     );
+    const allowToolParse = !!params.tools?.length;
 
     // Handle generation in the common function
     const generations = await staticGenerate(
@@ -364,7 +477,11 @@ export async function generateChatCompletion(
         promptTemplate,
     );
 
-    const response = createResponse(generations, ctx.model.path.name);
+    const response = createResponse(
+        generations,
+        ctx.model.path.name,
+        allowToolParse,
+    );
 
     logger.info(`Finished chat completion request ${ctx.requestId}`);
     return response;
@@ -396,7 +513,7 @@ async function generateToolCalls(
         logger.info(`Tool call detected for request ${gen.requestId}`);
 
         if (gen.fullText) {
-            prompt += prompt + gen.fullText;
+            prompt += gen.fullText;
         }
 
         const toolCtx = {

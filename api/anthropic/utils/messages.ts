@@ -29,7 +29,11 @@ import {
     staticGenerate,
     streamCollector,
 } from "@/api/OAI/utils/generation.ts";
-import { TOOL_CALL_SCHEMA, ToolCallProcessor } from "@/api/OAI/utils/tools.ts";
+import {
+    createInlineToolCallParser,
+    TOOL_CALL_SCHEMA,
+    ToolCallProcessor,
+} from "@/api/OAI/utils/tools.ts";
 import { PromptTemplate } from "@/common/templating.ts";
 import { logger } from "@/common/logging.ts";
 import { OAIContext } from "@/api/OAI/types/context.ts";
@@ -375,6 +379,10 @@ export async function streamAnthropicMessages(
 ) {
     logger.info(`Received streaming anthropic request ${ctx.requestId}`);
     const openaiRequest = convertAnthropicToOpenAI(request);
+    const allowToolParse = !!openaiRequest.tools?.length;
+    const inlineToolParser = allowToolParse
+        ? createInlineToolCallParser()
+        : null;
     const { prompt, media } = await buildPrompt(
         ctx,
         openaiRequest,
@@ -447,6 +455,13 @@ export async function streamAnthropicMessages(
             }
 
             if (chunk.kind === "data") {
+                const deltaText = inlineToolParser
+                    ? inlineToolParser.process(chunk.text)
+                    : chunk.text;
+                if (!deltaText) {
+                    continue;
+                }
+
                 if (!contentBlockStarted) {
                     await writeEvent(
                         "content_block_start",
@@ -462,7 +477,7 @@ export async function streamAnthropicMessages(
                     contentBlockStarted = true;
                 }
 
-                if (chunk.text) {
+                if (deltaText) {
                     await writeEvent(
                         "content_block_delta",
                         AnthropicStreamEvent.parse({
@@ -470,7 +485,7 @@ export async function streamAnthropicMessages(
                             index: contentBlockIndex,
                             delta: AnthropicDelta.parse({
                                 type: "text_delta",
-                                text: chunk.text,
+                                text: deltaText,
                             }),
                         }),
                     );
@@ -486,6 +501,38 @@ export async function streamAnthropicMessages(
             throw new Error("Generation finished without a final chunk.");
         }
 
+        if (inlineToolParser) {
+            const flushedText = inlineToolParser.flush();
+            if (flushedText) {
+                if (!contentBlockStarted) {
+                    await writeEvent(
+                        "content_block_start",
+                        AnthropicStreamEvent.parse({
+                            type: "content_block_start",
+                            index: contentBlockIndex,
+                            content_block: AnthropicContentBlock.parse({
+                                type: "text",
+                                text: "",
+                            }),
+                        }),
+                    );
+                    contentBlockStarted = true;
+                }
+
+                await writeEvent(
+                    "content_block_delta",
+                    AnthropicStreamEvent.parse({
+                        type: "content_block_delta",
+                        index: contentBlockIndex,
+                        delta: AnthropicDelta.parse({
+                            type: "text_delta",
+                            text: flushedText,
+                        }),
+                    }),
+                );
+            }
+        }
+
         if (contentBlockStarted) {
             await writeEvent(
                 "content_block_stop",
@@ -498,14 +545,30 @@ export async function streamAnthropicMessages(
             contentBlockIndex += 1;
         }
 
-        const toolCalls = await maybeGenerateToolCalls(
-            ctx,
-            prompt,
-            openaiRequest,
-            promptTemplate,
-            finishChunk,
-            media,
-        );
+        let toolCalls: ToolCall[] = [];
+        if (inlineToolParser && inlineToolParser.toolCalls.length > 0) {
+            toolCalls = inlineToolParser.toolCalls;
+        } else {
+            toolCalls = await maybeGenerateToolCalls(
+                ctx,
+                prompt,
+                openaiRequest,
+                promptTemplate,
+                finishChunk,
+                media,
+            );
+        }
+
+        if (
+            toolCalls.length === 0 &&
+            allowToolParse &&
+            finishChunk.fullText?.includes("<tool_call>")
+        ) {
+            const extracted = ToolCallProcessor.extractFromText(
+                finishChunk.fullText,
+            );
+            toolCalls = extracted.toolCalls;
+        }
 
         if (toolCalls.length > 0) {
             for (const toolCall of toolCalls) {
