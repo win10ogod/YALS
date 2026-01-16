@@ -221,9 +221,39 @@ function addTemplateMetadata(
         params.stop.push(...metadata.stop_strings);
     }
 
+    // Add tool-related stop strings
     if (metadata.tool_start) {
         params.stop.push(metadata.tool_start);
     }
+
+    // Add thinking-related stop strings if tools are enabled
+    // This allows us to detect when thinking ends and tool calls begin
+    if (params.tools?.length && metadata.thinking_end) {
+        // Don't add thinking_end as stop if we want to continue generating
+        // after thinking. Instead, the parser will handle it.
+    }
+}
+
+/**
+ * Get parser configuration from template metadata
+ */
+function getParserConfig(metadata: PromptTemplate["metadata"]) {
+    return {
+        reasoning: metadata.supports_thinking
+            ? {
+                  format: metadata.thinking_format ?? "generic",
+                  startToken: metadata.thinking_start,
+                  endToken: metadata.thinking_end,
+              }
+            : undefined,
+        toolCall: metadata.supports_tools
+            ? {
+                  format: metadata.tool_format ?? "xml",
+                  startToken: metadata.tool_start,
+                  endToken: metadata.tool_end,
+              }
+            : undefined,
+    };
 }
 
 async function buildChatPrompt(
