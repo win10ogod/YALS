@@ -28,10 +28,16 @@ import {
     createInlineToolCallParser,
     TOOL_CALL_SCHEMA,
     ToolCallProcessor,
+    ToolParserConfig,
 } from "./tools.ts";
 import { OAIContext } from "../types/context.ts";
 import { normalizeChatMessages } from "./messages.ts";
 import { HTTPException } from "hono/http-exception";
+import {
+    createStreamingThinkingParser,
+    extractThinking,
+    ThinkingConfig,
+} from "./thinking.ts";
 
 interface TemplateFormatOptions {
     addBosToken?: boolean;
@@ -42,33 +48,124 @@ interface TemplateFormatOptions {
     responsePrefix?: string;
 }
 
+/**
+ * Get tool parser configuration from template metadata
+ */
+function getToolParserConfig(
+    promptTemplate: PromptTemplate,
+): ToolParserConfig {
+    const metadata = promptTemplate.metadata;
+    return {
+        format: metadata.tool_call_format,
+        startToken: metadata.tool_start ?? "<tool_call>",
+        endToken: metadata.tool_end ?? "</tool_call>",
+    };
+}
+
+/**
+ * Get thinking parser configuration from template metadata
+ */
+function getThinkingConfig(
+    promptTemplate: PromptTemplate,
+): ThinkingConfig | undefined {
+    const metadata = promptTemplate.metadata;
+    if (!metadata.supports_thinking) {
+        return undefined;
+    }
+    return {
+        startTag: metadata.thinking_start ?? "<think>",
+        endTag: metadata.thinking_end ?? "</think>",
+    };
+}
+
+/**
+ * Parse content to extract thinking and tool calls
+ */
+function parseGeneratedContent(
+    text: string,
+    fullText: string | undefined,
+    toolParserConfig: ToolParserConfig,
+    thinkingConfig: ThinkingConfig | undefined,
+    allowToolParse: boolean,
+): {
+    content: string;
+    thinking: string | undefined;
+    toolCalls: ToolCall[] | undefined;
+} {
+    let content = text;
+    let thinking: string | undefined;
+    let toolCalls: ToolCall[] | undefined;
+
+    const textToParse = fullText ?? text;
+
+    // Extract thinking content first
+    if (thinkingConfig) {
+        const thinkingResult = extractThinking(textToParse, thinkingConfig);
+        if (thinkingResult.thinking) {
+            thinking = thinkingResult.thinking;
+            content = thinkingResult.content;
+        }
+    }
+
+    // Then extract tool calls
+    const shouldParseTools = allowToolParse ||
+        textToParse.includes(toolParserConfig.startToken ?? "<tool_call>");
+
+    if (shouldParseTools) {
+        const extracted = ToolCallProcessor.extractFromText(
+            content,
+            toolParserConfig,
+        );
+        if (extracted.toolCalls.length > 0) {
+            toolCalls = extracted.toolCalls;
+            content = extracted.content;
+        }
+    }
+
+    return { content, thinking, toolCalls };
+}
+
 function createResponse(
     chunks: FinishChunk[],
     modelName: string,
     allowToolParse: boolean,
+    toolParserConfig: ToolParserConfig,
+    thinkingConfig: ThinkingConfig | undefined,
 ) {
     const choices: ChatCompletionRespChoice[] = [];
 
     for (const chunk of chunks) {
         let content = chunk.text;
         let toolCalls: ToolCall[] | undefined;
+        let thinking: string | undefined;
 
         if (chunk.toolCalls) {
-            toolCalls = ToolCallProcessor.fromJson(chunk.toolCalls);
-        } else if (chunk.fullText) {
-            const shouldParseInline = allowToolParse ||
-                chunk.fullText.includes("<tool_call>");
-            if (!shouldParseInline) {
-                // keep content as-is
-            } else {
-                const extracted = ToolCallProcessor.extractFromText(
+            toolCalls = ToolCallProcessor.fromJson(
+                chunk.toolCalls,
+                toolParserConfig,
+            );
+            // Still need to extract thinking from content
+            if (thinkingConfig && chunk.fullText) {
+                const thinkingResult = extractThinking(
                     chunk.fullText,
+                    thinkingConfig,
                 );
-                if (extracted.toolCalls.length > 0) {
-                    toolCalls = extracted.toolCalls;
-                    content = extracted.content;
+                if (thinkingResult.thinking) {
+                    thinking = thinkingResult.thinking;
+                    content = thinkingResult.content;
                 }
             }
+        } else if (chunk.fullText) {
+            const parsed = parseGeneratedContent(
+                chunk.text,
+                chunk.fullText,
+                toolParserConfig,
+                thinkingConfig,
+                allowToolParse,
+            );
+            content = parsed.content;
+            thinking = parsed.thinking;
+            toolCalls = parsed.toolCalls;
         }
 
         const message = ChatCompletionMessage.parse({
@@ -78,6 +175,11 @@ function createResponse(
 
         if (toolCalls?.length) {
             message.tool_calls = toolCalls;
+        }
+
+        // Add thinking content if present
+        if (thinking) {
+            message.reasoning_content = thinking;
         }
 
         const finishReason = toolCalls?.length
@@ -109,6 +211,8 @@ function createStreamChunk(
     modelName: string,
     cmplId: string,
     allowToolParse: boolean,
+    toolParserConfig: ToolParserConfig,
+    thinkingConfig: ThinkingConfig | undefined,
 ) {
     const message = ChatCompletionMessage.parse({
         role: "assistant",
@@ -117,17 +221,23 @@ function createStreamChunk(
 
     if (chunk.kind === "finish") {
         if (chunk.toolCalls) {
-            message.tool_calls = ToolCallProcessor.fromJson(chunk.toolCalls);
+            message.tool_calls = ToolCallProcessor.fromJson(
+                chunk.toolCalls,
+                toolParserConfig,
+            );
         } else if (chunk.fullText) {
-            const shouldParseInline = allowToolParse ||
-                chunk.fullText.includes("<tool_call>");
-            if (shouldParseInline) {
-                const extracted = ToolCallProcessor.extractFromText(
-                    chunk.fullText,
-                );
-                if (extracted.toolCalls.length > 0) {
-                    message.tool_calls = extracted.toolCalls;
-                }
+            const parsed = parseGeneratedContent(
+                chunk.text,
+                chunk.fullText,
+                toolParserConfig,
+                thinkingConfig,
+                allowToolParse,
+            );
+            if (parsed.toolCalls?.length) {
+                message.tool_calls = parsed.toolCalls;
+            }
+            if (parsed.thinking) {
+                message.reasoning_content = parsed.thinking;
             }
         }
     }
@@ -272,10 +382,22 @@ export async function streamChatCompletion(
     logger.info(`Received streaming chat completion request ${ctx.requestId}`);
 
     const toolStart = promptTemplate.metadata.tool_start;
+    const toolParserConfig = getToolParserConfig(promptTemplate);
+    const thinkingConfig = getThinkingConfig(promptTemplate);
     const allowToolParse = !!params.tools?.length;
+
+    // Create parser factories with template-specific config
+    const createToolParser = () => createInlineToolCallParser(toolParserConfig);
+    const createThinkingParser = () =>
+        thinkingConfig ? createStreamingThinkingParser(thinkingConfig) : null;
+
     const inlineToolParsers = allowToolParse
         ? new Map<number, ReturnType<typeof createInlineToolCallParser>>()
         : null;
+    const inlineThinkingParsers = thinkingConfig
+        ? new Map<number, ReturnType<typeof createStreamingThinkingParser>>()
+        : null;
+
     const cmplId = `chatcmpl-${crypto.randomUUID().replaceAll("-", "")}`;
     const genAbortController = new AbortController();
     let finished = false;
@@ -331,15 +453,30 @@ export async function streamChatCompletion(
                 throw chunk;
             }
 
+            // Get or create parsers for this task
             const inlineToolParser = inlineToolParsers
-                ? inlineToolParsers.get(chunk.taskIdx) ??
-                    createInlineToolCallParser()
+                ? inlineToolParsers.get(chunk.taskIdx) ?? createToolParser()
                 : null;
             if (inlineToolParser && inlineToolParsers) {
                 inlineToolParsers.set(chunk.taskIdx, inlineToolParser);
             }
 
+            const inlineThinkingParser = inlineThinkingParsers
+                ? inlineThinkingParsers.get(chunk.taskIdx) ??
+                    createThinkingParser()
+                : null;
+            if (inlineThinkingParser && inlineThinkingParsers) {
+                inlineThinkingParsers.set(chunk.taskIdx, inlineThinkingParser);
+            }
+
             if (chunk.kind === "finish") {
+                // Flush thinking parser first
+                if (inlineThinkingParser) {
+                    const flushedThinking = inlineThinkingParser.flush();
+                    // Thinking content is captured but not streamed to user
+                    // It will be included in the final message if needed
+                }
+
                 if (inlineToolParser) {
                     const flushedText = inlineToolParser.flush();
                     if (flushedText) {
@@ -354,6 +491,8 @@ export async function streamChatCompletion(
                             ctx.model.path.name,
                             cmplId,
                             allowToolParse,
+                            toolParserConfig,
+                            thinkingConfig,
                         );
                         await stream.writeSSE({
                             data: JSON.stringify(streamChunk),
@@ -383,24 +522,45 @@ export async function streamChatCompletion(
                 if (inlineToolParsers) {
                     inlineToolParsers.delete(chunk.taskIdx);
                 }
+                if (inlineThinkingParsers) {
+                    inlineThinkingParsers.delete(chunk.taskIdx);
+                }
 
                 completedTasks++;
             }
 
-            if (chunk.kind === "data" && inlineToolParser) {
-                const filteredText = inlineToolParser.process(chunk.text);
-                if (!filteredText) {
+            if (chunk.kind === "data") {
+                let textToStream = chunk.text;
+
+                // Process through thinking parser first (filters out thinking tags)
+                if (inlineThinkingParser) {
+                    const thinkingResult = inlineThinkingParser.process(
+                        textToStream,
+                    );
+                    textToStream = thinkingResult.content;
+                    // thinkingResult.thinking is captured but not streamed
+                }
+
+                // Then process through tool parser (filters out tool tags)
+                if (inlineToolParser) {
+                    textToStream = inlineToolParser.process(textToStream);
+                }
+
+                if (!textToStream) {
                     continue;
                 }
+
                 const filteredChunk: GenerationChunk = {
                     ...chunk,
-                    text: filteredText,
+                    text: textToStream,
                 };
                 const streamChunk = createStreamChunk(
                     filteredChunk,
                     ctx.model.path.name,
                     cmplId,
                     allowToolParse,
+                    toolParserConfig,
+                    thinkingConfig,
                 );
                 await stream.writeSSE({ data: JSON.stringify(streamChunk) });
             } else {
@@ -409,6 +569,8 @@ export async function streamChatCompletion(
                     ctx.model.path.name,
                     cmplId,
                     allowToolParse,
+                    toolParserConfig,
+                    thinkingConfig,
                 );
                 await stream.writeSSE({ data: JSON.stringify(streamChunk) });
             }
@@ -458,6 +620,8 @@ export async function generateChatCompletion(
         promptTemplate,
     );
     const allowToolParse = !!params.tools?.length;
+    const toolParserConfig = getToolParserConfig(promptTemplate);
+    const thinkingConfig = getThinkingConfig(promptTemplate);
 
     // Handle generation in the common function
     const generations = await staticGenerate(
@@ -481,6 +645,8 @@ export async function generateChatCompletion(
         generations,
         ctx.model.path.name,
         allowToolParse,
+        toolParserConfig,
+        thinkingConfig,
     );
 
     logger.info(`Finished chat completion request ${ctx.requestId}`);

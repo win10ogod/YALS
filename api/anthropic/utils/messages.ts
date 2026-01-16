@@ -33,7 +33,13 @@ import {
     createInlineToolCallParser,
     TOOL_CALL_SCHEMA,
     ToolCallProcessor,
+    ToolParserConfig,
 } from "@/api/OAI/utils/tools.ts";
+import {
+    createStreamingThinkingParser,
+    extractThinking,
+    ThinkingConfig,
+} from "@/api/OAI/utils/thinking.ts";
 import { PromptTemplate } from "@/common/templating.ts";
 import { logger } from "@/common/logging.ts";
 import { OAIContext } from "@/api/OAI/types/context.ts";
@@ -49,6 +55,36 @@ const STOP_REASON_MAP: Record<string, AnthropicStopReason> = {
     length: "max_tokens",
     tool_calls: "tool_use",
 };
+
+/**
+ * Get tool parser configuration from template metadata
+ */
+function getToolParserConfig(
+    promptTemplate: PromptTemplate,
+): ToolParserConfig {
+    const metadata = promptTemplate.metadata;
+    return {
+        format: metadata.tool_call_format,
+        startToken: metadata.tool_start ?? "<tool_call>",
+        endToken: metadata.tool_end ?? "</tool_call>",
+    };
+}
+
+/**
+ * Get thinking parser configuration from template metadata
+ */
+function getThinkingConfig(
+    promptTemplate: PromptTemplate,
+): ThinkingConfig | undefined {
+    const metadata = promptTemplate.metadata;
+    if (!metadata.supports_thinking) {
+        return undefined;
+    }
+    return {
+        startTag: metadata.thinking_start ?? "<think>",
+        endTag: metadata.thinking_end ?? "</think>",
+    };
+}
 
 function convertAnthropicToOpenAI(
     request: AnthropicMessagesRequest,
@@ -214,16 +250,35 @@ function convertOpenAIResponse(
     response: ChatCompletionResponseType,
 ): AnthropicMessagesResponseType {
     const choice = response.choices[0];
-    const contentText = typeof choice.message.content === "string"
-        ? choice.message.content
+    const message = choice.message as Record<string, unknown>;
+    const contentText = typeof message.content === "string"
+        ? message.content
         : "";
-    const content: AnthropicContentBlockType[] = [
-        AnthropicContentBlock.parse({
-            type: "text",
-            text: contentText,
-        }),
-    ];
+    const reasoningContent = message.reasoning_content as string | undefined;
 
+    const content: AnthropicContentBlockType[] = [];
+
+    // Add thinking block first if present (Anthropic extended thinking format)
+    if (reasoningContent) {
+        content.push(
+            AnthropicContentBlock.parse({
+                type: "thinking",
+                thinking: reasoningContent,
+            }),
+        );
+    }
+
+    // Add text content
+    if (contentText) {
+        content.push(
+            AnthropicContentBlock.parse({
+                type: "text",
+                text: contentText,
+            }),
+        );
+    }
+
+    // Add tool calls
     if (choice.message.tool_calls) {
         for (const toolCall of choice.message.tool_calls) {
             const args = toolCall.function.arguments;
@@ -246,6 +301,16 @@ function convertOpenAIResponse(
                 }),
             );
         }
+    }
+
+    // Ensure at least one content block
+    if (content.length === 0) {
+        content.push(
+            AnthropicContentBlock.parse({
+                type: "text",
+                text: "",
+            }),
+        );
     }
 
     return AnthropicMessagesResponse.parse({
@@ -380,9 +445,18 @@ export async function streamAnthropicMessages(
     logger.info(`Received streaming anthropic request ${ctx.requestId}`);
     const openaiRequest = convertAnthropicToOpenAI(request);
     const allowToolParse = !!openaiRequest.tools?.length;
+
+    // Get parser configurations from template
+    const toolParserConfig = getToolParserConfig(promptTemplate);
+    const thinkingConfig = getThinkingConfig(promptTemplate);
+
     const inlineToolParser = allowToolParse
-        ? createInlineToolCallParser()
+        ? createInlineToolCallParser(toolParserConfig)
         : null;
+    const inlineThinkingParser = thinkingConfig
+        ? createStreamingThinkingParser(thinkingConfig)
+        : null;
+
     const { prompt, media } = await buildPrompt(
         ctx,
         openaiRequest,
@@ -400,6 +474,8 @@ export async function streamAnthropicMessages(
         }
     });
 
+    let thinkingBlockStarted = false;
+    let thinkingBlockIndex = -1;
     let contentBlockStarted = false;
     let contentBlockIndex = 0;
 
@@ -455,11 +531,73 @@ export async function streamAnthropicMessages(
             }
 
             if (chunk.kind === "data") {
+                let textToProcess = chunk.text;
+                let thinkingText = "";
+
+                // Process through thinking parser first
+                if (inlineThinkingParser) {
+                    const thinkingResult = inlineThinkingParser.process(
+                        textToProcess,
+                    );
+                    textToProcess = thinkingResult.content;
+                    thinkingText = thinkingResult.thinking;
+
+                    // Stream thinking content if we have any
+                    if (thinkingText) {
+                        if (!thinkingBlockStarted) {
+                            thinkingBlockIndex = contentBlockIndex;
+                            contentBlockIndex++;
+                            await writeEvent(
+                                "content_block_start",
+                                AnthropicStreamEvent.parse({
+                                    type: "content_block_start",
+                                    index: thinkingBlockIndex,
+                                    content_block: AnthropicContentBlock.parse({
+                                        type: "thinking",
+                                        thinking: "",
+                                    }),
+                                }),
+                            );
+                            thinkingBlockStarted = true;
+                        }
+
+                        await writeEvent(
+                            "content_block_delta",
+                            AnthropicStreamEvent.parse({
+                                type: "content_block_delta",
+                                index: thinkingBlockIndex,
+                                delta: AnthropicDelta.parse({
+                                    type: "thinking_delta",
+                                    thinking: thinkingText,
+                                }),
+                            }),
+                        );
+                    }
+                }
+
+                // Process through tool parser
                 const deltaText = inlineToolParser
-                    ? inlineToolParser.process(chunk.text)
-                    : chunk.text;
+                    ? inlineToolParser.process(textToProcess)
+                    : textToProcess;
+
                 if (!deltaText) {
                     continue;
+                }
+
+                // Close thinking block before starting text block
+                if (
+                    thinkingBlockStarted &&
+                    inlineThinkingParser &&
+                    !inlineThinkingParser.isInThinking()
+                ) {
+                    await writeEvent(
+                        "content_block_stop",
+                        AnthropicStreamEvent.parse({
+                            type: "content_block_stop",
+                            index: thinkingBlockIndex,
+                        }),
+                    );
+                    thinkingBlockStarted = false;
                 }
 
                 if (!contentBlockStarted) {
@@ -499,6 +637,36 @@ export async function streamAnthropicMessages(
 
         if (!finishChunk) {
             throw new Error("Generation finished without a final chunk.");
+        }
+
+        // Flush thinking parser
+        if (inlineThinkingParser) {
+            const flushedThinking = inlineThinkingParser.flush();
+            if (flushedThinking.thinking && thinkingBlockStarted) {
+                await writeEvent(
+                    "content_block_delta",
+                    AnthropicStreamEvent.parse({
+                        type: "content_block_delta",
+                        index: thinkingBlockIndex,
+                        delta: AnthropicDelta.parse({
+                            type: "thinking_delta",
+                            thinking: flushedThinking.thinking,
+                        }),
+                    }),
+                );
+            }
+        }
+
+        // Close thinking block if still open
+        if (thinkingBlockStarted) {
+            await writeEvent(
+                "content_block_stop",
+                AnthropicStreamEvent.parse({
+                    type: "content_block_stop",
+                    index: thinkingBlockIndex,
+                }),
+            );
+            thinkingBlockStarted = false;
         }
 
         if (inlineToolParser) {
@@ -559,13 +727,15 @@ export async function streamAnthropicMessages(
             );
         }
 
+        const toolStartToken = toolParserConfig.startToken ?? "<tool_call>";
         if (
             toolCalls.length === 0 &&
             allowToolParse &&
-            finishChunk.fullText?.includes("<tool_call>")
+            finishChunk.fullText?.includes(toolStartToken)
         ) {
             const extracted = ToolCallProcessor.extractFromText(
                 finishChunk.fullText,
+                toolParserConfig,
             );
             toolCalls = extracted.toolCalls;
         }

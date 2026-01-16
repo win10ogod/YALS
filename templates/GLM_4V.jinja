@@ -1,3 +1,13 @@
+{# Metadata #}
+{%- set stop_strings = ["<|user|>", "<|assistant|>", "<|observation|>", "<|system|>"] -%}
+{%- set tool_start = "<tool_call>" -%}
+{%- set tool_end = "</tool_call>" -%}
+{%- set tool_call_format = "xml_kv" -%}
+{%- set thinking_start = "<think>" -%}
+{%- set thinking_end = "</think>" -%}
+{%- set supports_thinking = true -%}
+
+{# Template #}
 [gMASK]<sop>
 {%- if tools -%}
 <|system|>

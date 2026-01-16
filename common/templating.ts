@@ -23,9 +23,28 @@ export function range(start: number, stop?: number, step = 1): number[] {
     return result;
 }
 
+// Tool call format types supported by templates
+export const ToolCallFormat = z.enum([
+    "xml_kv",      // GLM format: <tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+    "json_simple", // IQuest format: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    "json_oai",    // OAI format: [{"function": {"name": "...", "arguments": "..."}}]
+]);
+
+export type ToolCallFormat = z.infer<typeof ToolCallFormat>;
+
 const TemplateMetadataSchema = z.object({
+    // Stop strings for the model
     stop_strings: z.array(z.string()).default([]),
+
+    // Tool call configuration
     tool_start: z.string().optional(),
+    tool_end: z.string().optional(),
+    tool_call_format: ToolCallFormat.optional(),
+
+    // Thinking/reasoning configuration
+    thinking_start: z.string().optional(),
+    thinking_end: z.string().optional(),
+    supports_thinking: z.boolean().optional(),
 });
 
 type TemplateMetadata = z.infer<typeof TemplateMetadataSchema>;

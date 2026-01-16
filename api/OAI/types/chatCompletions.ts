@@ -28,6 +28,8 @@ export const ChatCompletionMessage = z.object({
         .cleanOptional(),
     tool_calls: z.array(ToolCall).cleanOptional(),
     tool_call_id: z.string().cleanOptional(),
+    // Thinking/reasoning content (for models that support chain-of-thought)
+    reasoning_content: z.string().cleanOptional(),
 });
 
 export type ChatCompletionMessage = z.infer<typeof ChatCompletionMessage>;

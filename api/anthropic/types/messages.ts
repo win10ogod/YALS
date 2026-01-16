@@ -18,8 +18,9 @@ export const AnthropicUsage = z.object({
 });
 
 export const AnthropicContentBlock = z.object({
-    type: z.enum(["text", "image", "tool_use", "tool_result"]),
+    type: z.enum(["text", "image", "tool_use", "tool_result", "thinking"]),
     text: z.string().cleanOptional(),
+    thinking: z.string().cleanOptional(), // For thinking blocks
     source: z.record(z.string(), z.unknown()).cleanOptional(),
     id: z.string().cleanOptional(),
     tool_use_id: z.string().cleanOptional(),
@@ -82,8 +83,10 @@ export const AnthropicMessagesResponse = z.object({
 });
 
 export const AnthropicDelta = z.object({
-    type: z.enum(["text_delta", "input_json_delta"]).cleanOptional(),
+    type: z.enum(["text_delta", "input_json_delta", "thinking_delta"])
+        .cleanOptional(),
     text: z.string().cleanOptional(),
+    thinking: z.string().cleanOptional(), // For thinking deltas
     partial_json: z.string().cleanOptional(),
     stop_reason: z.enum([
         "end_turn",
