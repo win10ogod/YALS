@@ -98,6 +98,7 @@ function convertAnthropicToOpenAI(
                 content: request.system,
                 tool_calls: undefined,
                 tool_call_id: undefined,
+                reasoning_content: undefined,
             });
         } else {
             const systemText = request.system
@@ -110,6 +111,7 @@ function convertAnthropicToOpenAI(
                     content: systemText,
                     tool_calls: undefined,
                     tool_call_id: undefined,
+                    reasoning_content: undefined,
                 });
             }
         }
@@ -121,6 +123,7 @@ function convertAnthropicToOpenAI(
             content: "",
             tool_calls: undefined,
             tool_call_id: undefined,
+            reasoning_content: undefined,
         };
 
         if (typeof msg.content === "string") {
@@ -189,6 +192,7 @@ function convertAnthropicToOpenAI(
                         tool_call_id: block.tool_use_id ?? block.id ?? "",
                         content: block.content ? String(block.content) : "",
                         tool_calls: undefined,
+                        reasoning_content: undefined,
                     });
                 } else {
                     contentParts.push({
