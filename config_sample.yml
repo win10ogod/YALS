@@ -98,6 +98,7 @@ model:
   # If you see template tokens in responses, set this explicitly to the
   # correct template for the model.
   prompt_template:
+
   # Optional template kwargs passed into the chat template (default: {})
   # Example (disable chain-of-thought tags for supported templates):
   # chat_template_kwargs:
@@ -106,6 +107,45 @@ model:
   # place a file named "<prompt_template>_tool_use.jinja" in templates/.
   # Example: templates/chatml_tool_use.jinja
   chat_template_kwargs: {}
+
+  # ============================================================================
+  # Template Metadata (for custom templates)
+  # ============================================================================
+  # Templates can define metadata using Jinja {% set %} statements.
+  # This enables automatic parsing of thinking/tool content in responses.
+  #
+  # Supported metadata fields in templates:
+  #
+  # stop_strings: Array of strings that stop generation
+  #   {%- set stop_strings = ["<|im_end|>", "<|im_start|>"] -%}
+  #
+  # tool_start / tool_end: Tags for tool calls
+  #   {%- set tool_start = "<tool_call>" -%}
+  #   {%- set tool_end = "</tool_call>" -%}
+  #
+  # tool_call_format: Format of tool calls inside tags
+  #   {%- set tool_call_format = "json_simple" -%}
+  #   Supported formats:
+  #   - "xml_kv": GLM style - <tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+  #   - "json_simple": IQuest style - <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+  #   - "json_oai": OpenAI style - [{"function": {"name": "...", "arguments": "..."}}]
+  #
+  # thinking_start / thinking_end / supports_thinking: For CoT/reasoning models
+  #   {%- set thinking_start = "<think>" -%}
+  #   {%- set thinking_end = "</think>" -%}
+  #   {%- set supports_thinking = true -%}
+  #
+  # Example template with full metadata:
+  #   {# Metadata #}
+  #   {%- set stop_strings = ["<|im_start|>", "<|im_end|>"] -%}
+  #   {%- set tool_start = "<tool_call>" -%}
+  #   {%- set tool_end = "</tool_call>" -%}
+  #   {%- set tool_call_format = "json_simple" -%}
+  #   {%- set thinking_start = "<think>" -%}
+  #   {%- set thinking_end = "</think>" -%}
+  #   {%- set supports_thinking = true -%}
+  #   {# Template content follows... #}
+  # ============================================================================
 
   # Multimodal projector file (for vision models). Leave empty to disable (default: None)
   mmproj:
