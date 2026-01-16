@@ -49,6 +49,7 @@ export const CompletionRequest = z.object({
         z.string(),
         z.array(z.string()).transform((arr) => arr.join("\n")),
     ]),
+    include_reasoning: z.boolean().nullish().coalesce(true),
 })
     .and(CommonCompletionRequest)
     .describe("Completion Request parameters");
@@ -59,6 +60,8 @@ export const CompletionRespChoice = z.object({
     index: z.number().default(0),
     finish_reason: z.string().optional(),
     text: z.string(),
+    reasoning: z.string().cleanOptional(),
+    reasoning_content: z.string().cleanOptional(),
 });
 
 export type CompletionRespChoice = z.infer<typeof CompletionRespChoice>;

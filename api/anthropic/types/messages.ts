@@ -18,8 +18,17 @@ export const AnthropicUsage = z.object({
 });
 
 export const AnthropicContentBlock = z.object({
-    type: z.enum(["text", "image", "tool_use", "tool_result"]),
+    type: z.enum([
+        "text",
+        "thinking",
+        "redacted_thinking",
+        "image",
+        "tool_use",
+        "tool_result",
+    ]),
     text: z.string().cleanOptional(),
+    thinking: z.string().cleanOptional(),
+    signature: z.string().cleanOptional(),
     source: z.record(z.string(), z.unknown()).cleanOptional(),
     id: z.string().cleanOptional(),
     tool_use_id: z.string().cleanOptional(),
@@ -57,6 +66,7 @@ export const AnthropicMessagesRequest = z.object({
     stream: z.boolean().nullish().coalesce(false),
     system: z.union([z.string(), z.array(AnthropicContentBlock)]).cleanOptional(),
     temperature: z.number().cleanOptional(),
+    include_reasoning: z.boolean().nullish().coalesce(true),
     tool_choice: AnthropicToolChoice.cleanOptional(),
     tools: z.array(AnthropicTool).cleanOptional(),
     top_k: z.number().cleanOptional(),
@@ -82,8 +92,15 @@ export const AnthropicMessagesResponse = z.object({
 });
 
 export const AnthropicDelta = z.object({
-    type: z.enum(["text_delta", "input_json_delta"]).cleanOptional(),
+    type: z.enum([
+        "text_delta",
+        "input_json_delta",
+        "thinking_delta",
+        "signature_delta",
+    ]).cleanOptional(),
     text: z.string().cleanOptional(),
+    thinking: z.string().cleanOptional(),
+    signature: z.string().cleanOptional(),
     partial_json: z.string().cleanOptional(),
     stop_reason: z.enum([
         "end_turn",

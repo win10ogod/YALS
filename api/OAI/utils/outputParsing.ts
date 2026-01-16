@@ -513,18 +513,34 @@ export function createStreamingOutputParser(
     const hints = getParsingHints(options.promptTemplate);
 
     const toolPatterns = options.allowToolParse ? buildToolPatterns(hints) : [];
-    const reasoningStart = hints.reasoningStart;
-    const reasoningEnd = hints.reasoningEnd;
+    let reasoningStart = hints.reasoningStart;
+    let reasoningEnd = hints.reasoningEnd;
+    let altReasoningStart: string | undefined;
+    let altReasoningEnd: string | undefined;
 
-    const startTokens = [reasoningStart, ...toolPatterns.map((pattern) => pattern.start)]
+    if (!reasoningStart && !reasoningEnd) {
+        reasoningStart = DEFAULT_REASONING_START;
+        reasoningEnd = DEFAULT_REASONING_END;
+        altReasoningStart = ALT_REASONING_START;
+        altReasoningEnd = ALT_REASONING_END;
+    }
+
+    const startTokens = [
+        reasoningStart,
+        altReasoningStart,
+        ...toolPatterns.map((pattern) => pattern.start),
+    ]
         .filter((token) => !!token) as string[];
-    const endTokens = reasoningEnd ? [reasoningEnd] : [];
+    const endTokens = [reasoningEnd, altReasoningEnd]
+        .filter((token) => !!token) as string[];
 
     let buffer = "";
     let toolBuffer = "";
     let reasoningBuffer = "";
     let mode: "normal" | "tool" | "reasoning" = "normal";
     let activePattern: ToolPattern | null = null;
+    let activeReasoningStart = reasoningStart;
+    let activeReasoningEnd = reasoningEnd;
 
     const toolCalls: ToolCall[] = [];
 
@@ -541,7 +557,15 @@ export function createStreamingOutputParser(
                 }
             }
 
-            const reasoningIdx = reasoningStart ? buffer.indexOf(reasoningStart) : -1;
+            let reasoningIdx = reasoningStart ? buffer.indexOf(reasoningStart) : -1;
+            let nextReasoningStart = reasoningStart;
+            if (altReasoningStart) {
+                const altIdx = buffer.indexOf(altReasoningStart);
+                if (altIdx !== -1 && (reasoningIdx === -1 || altIdx < reasoningIdx)) {
+                    reasoningIdx = altIdx;
+                    nextReasoningStart = altReasoningStart;
+                }
+            }
             const toolIdx = nextTool ? nextTool.index : -1;
 
             let nextIdx = -1;
@@ -570,10 +594,14 @@ export function createStreamingOutputParser(
             }
 
             if (nextType === "reasoning") {
-                if (!reasoningStart) {
+                if (!nextReasoningStart) {
                     break;
                 }
-                buffer = buffer.slice(reasoningStart.length);
+                activeReasoningStart = nextReasoningStart;
+                activeReasoningEnd = nextReasoningStart === altReasoningStart
+                    ? altReasoningEnd
+                    : reasoningEnd;
+                buffer = buffer.slice(activeReasoningStart.length);
                 mode = "reasoning";
                 reasoningBuffer = "";
                 break;
@@ -590,13 +618,13 @@ export function createStreamingOutputParser(
     };
 
     const processReasoning = (output: ParsedOutputDelta) => {
-        if (!reasoningEnd) {
+        if (!activeReasoningEnd) {
             reasoningBuffer += buffer;
             buffer = "";
             return;
         }
 
-        const endIdx = buffer.indexOf(reasoningEnd);
+        const endIdx = buffer.indexOf(activeReasoningEnd);
         if (endIdx === -1) {
             const keepLen = trailingTokenPrefix(buffer, endTokens);
             const emitLen = buffer.length - keepLen;
@@ -608,7 +636,7 @@ export function createStreamingOutputParser(
         }
 
         reasoningBuffer += buffer.slice(0, endIdx);
-        buffer = buffer.slice(endIdx + reasoningEnd.length);
+        buffer = buffer.slice(endIdx + activeReasoningEnd.length);
         if (options.includeReasoning && reasoningBuffer) {
             output.reasoning = (output.reasoning ?? "") + reasoningBuffer;
         }

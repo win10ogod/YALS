@@ -8,7 +8,7 @@ import {
     staticGenerate,
     streamCollector,
 } from "@/api/OAI/utils/generation.ts";
-import { GenerationChunk } from "@/bindings/types.ts";
+import { FinishChunk, GenerationChunk } from "@/bindings/types.ts";
 import { CancellationError } from "@/common/errors.ts";
 import { toGeneratorError } from "@/common/networking.ts";
 import { logger } from "@/common/logging.ts";
@@ -18,25 +18,36 @@ import {
     CompletionResponse,
 } from "../types/completions.ts";
 import { OAIContext } from "../types/context.ts";
+import { createStreamingOutputParser, parseOutputText } from "./outputParsing.ts";
 
-function createResponse(chunks: GenerationChunk[], modelName: string) {
+function createResponse(
+    chunks: FinishChunk[],
+    modelName: string,
+    includeReasoning: boolean,
+) {
     const choices: CompletionRespChoice[] = [];
     for (const chunk of chunks) {
-        const finishReason = chunk.kind === "finish"
-            ? convertFinishReason(chunk)
-            : undefined;
+        const fullText = chunk.fullText ?? chunk.text;
+        const parsed = parseOutputText(fullText, {
+            allowToolParse: false,
+            includeReasoning,
+        });
+        const finishReason = convertFinishReason(chunk);
+        const reasoning = parsed.reasoning || undefined;
 
         const choice = CompletionRespChoice.parse({
             index: chunk.taskIdx,
-            text: chunk.text,
+            text: parsed.content ?? "",
             finish_reason: finishReason,
+            reasoning,
+            reasoning_content: reasoning,
         });
 
         choices.push(choice);
     }
 
     const finalChunk = chunks.at(-1);
-    const usage = finalChunk?.kind === "finish"
+    const usage = finalChunk
         ? createUsageStats(finalChunk)
         : undefined;
 
@@ -56,6 +67,11 @@ export async function streamCompletion(
 ) {
     logger.info(`Received streaming completion request ${ctx.requestId}`);
 
+    const includeReasoning = params.include_reasoning ?? true;
+    const outputParsers = new Map<
+        number,
+        ReturnType<typeof createStreamingOutputParser>
+    >();
     const genAbortController = new AbortController();
     let finished = false;
 
@@ -103,7 +119,54 @@ export async function streamCompletion(
                 throw chunk;
             }
 
-            const streamChunk = createResponse([chunk], ctx.model.path.name);
+            const outputParser = outputParsers.get(chunk.taskIdx) ??
+                createStreamingOutputParser({
+                    allowToolParse: false,
+                    includeReasoning,
+                });
+            outputParsers.set(chunk.taskIdx, outputParser);
+
+            if (chunk.kind === "data") {
+                const parsed = outputParser.process(chunk.text);
+                const content = parsed.content ?? "";
+                const reasoning = parsed.reasoning || undefined;
+                if (!content && !reasoning) {
+                    continue;
+                }
+
+                const choice = CompletionRespChoice.parse({
+                    index: chunk.taskIdx,
+                    text: content,
+                    reasoning,
+                    reasoning_content: reasoning,
+                });
+                const streamChunk = CompletionResponse.parse({
+                    choices: [choice],
+                    model: ctx.model.path.name,
+                });
+                await stream.writeSSE({ data: JSON.stringify(streamChunk) });
+                continue;
+            }
+
+            const parsed = outputParser.process(chunk.text);
+            const flushed = outputParser.flush();
+            outputParsers.delete(chunk.taskIdx);
+
+            const content = `${parsed.content ?? ""}${flushed.content ?? ""}`;
+            const reasoning = `${parsed.reasoning ?? ""}${flushed.reasoning ?? ""}`
+                .trim() || undefined;
+            const choice = CompletionRespChoice.parse({
+                index: chunk.taskIdx,
+                text: content,
+                finish_reason: convertFinishReason(chunk),
+                reasoning,
+                reasoning_content: reasoning,
+            });
+            const streamChunk = CompletionResponse.parse({
+                choices: [choice],
+                model: ctx.model.path.name,
+                usage: createUsageStats(chunk),
+            });
             await stream.writeSSE({ data: JSON.stringify(streamChunk) });
 
             if (chunk.kind === "finish") {
@@ -134,6 +197,7 @@ export async function generateCompletion(
 ) {
     logger.info(`Received completion request ${ctx.requestId}`);
 
+    const includeReasoning = params.include_reasoning ?? true;
     // Handle generation in the common function
     const generations = await staticGenerate(
         ctx,
@@ -142,7 +206,11 @@ export async function generateCompletion(
         params,
     );
 
-    const response = createResponse(generations, ctx.model.path.name);
+    const response = createResponse(
+        generations,
+        ctx.model.path.name,
+        includeReasoning,
+    );
 
     logger.info(`Finished completion request ${ctx.requestId}`);
     return response;

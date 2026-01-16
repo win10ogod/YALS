@@ -216,6 +216,7 @@ function convertAnthropicToOpenAI(
         top_p: request.top_p,
         top_k: request.top_k,
         stream: request.stream ?? false,
+        include_reasoning: request.include_reasoning,
         tools,
     });
 
@@ -229,12 +230,27 @@ function convertOpenAIResponse(
     const contentText = typeof choice.message.content === "string"
         ? choice.message.content
         : "";
-    const content: AnthropicContentBlockType[] = [
+    const reasoningText = choice.message.reasoning ??
+        choice.message.reasoning_content ??
+        "";
+    const content: AnthropicContentBlockType[] = [];
+
+    if (reasoningText) {
+        content.push(
+            AnthropicContentBlock.parse({
+                type: "thinking",
+                thinking: reasoningText,
+                signature: "",
+            }),
+        );
+    }
+
+    content.push(
         AnthropicContentBlock.parse({
             type: "text",
             text: contentText,
         }),
-    ];
+    );
 
     if (choice.message.tool_calls) {
         for (const toolCall of choice.message.tool_calls) {
@@ -394,13 +410,14 @@ export async function streamAnthropicMessages(
     logger.info(`Received streaming anthropic request ${ctx.requestId}`);
     const openaiRequest = convertAnthropicToOpenAI(request);
     const allowToolParse = !!openaiRequest.tools?.length;
+    const includeReasoning = openaiRequest.include_reasoning ?? true;
     const toolParseEnabled = allowToolParse ||
         !!(promptTemplate.metadata.tool_call_start ||
             promptTemplate.metadata.tool_calls_start);
     const outputParser = createStreamingOutputParser({
         promptTemplate,
         allowToolParse: toolParseEnabled,
-        includeReasoning: false,
+        includeReasoning,
     });
     const { prompt, media } = await buildPrompt(
         ctx,
@@ -419,7 +436,8 @@ export async function streamAnthropicMessages(
         }
     });
 
-    let contentBlockStarted = false;
+    let thinkingBlockStarted = false;
+    let textBlockStarted = false;
     let contentBlockIndex = 0;
 
     const writeEvent = async (
@@ -430,6 +448,76 @@ export async function streamAnthropicMessages(
             event,
             data: JSON.stringify(payload),
         });
+    };
+
+    const startThinkingBlock = async () => {
+        if (thinkingBlockStarted) {
+            return;
+        }
+        await writeEvent(
+            "content_block_start",
+            AnthropicStreamEvent.parse({
+                type: "content_block_start",
+                index: contentBlockIndex,
+                content_block: AnthropicContentBlock.parse({
+                    type: "thinking",
+                    thinking: "",
+                    signature: "",
+                }),
+            }),
+        );
+        thinkingBlockStarted = true;
+    };
+
+    const stopThinkingBlock = async () => {
+        if (!thinkingBlockStarted) {
+            return;
+        }
+        await writeEvent(
+            "content_block_stop",
+            AnthropicStreamEvent.parse({
+                type: "content_block_stop",
+                index: contentBlockIndex,
+            }),
+        );
+        thinkingBlockStarted = false;
+        contentBlockIndex += 1;
+    };
+
+    const startTextBlock = async () => {
+        if (textBlockStarted) {
+            return;
+        }
+        if (thinkingBlockStarted) {
+            await stopThinkingBlock();
+        }
+        await writeEvent(
+            "content_block_start",
+            AnthropicStreamEvent.parse({
+                type: "content_block_start",
+                index: contentBlockIndex,
+                content_block: AnthropicContentBlock.parse({
+                    type: "text",
+                    text: "",
+                }),
+            }),
+        );
+        textBlockStarted = true;
+    };
+
+    const stopTextBlock = async () => {
+        if (!textBlockStarted) {
+            return;
+        }
+        await writeEvent(
+            "content_block_stop",
+            AnthropicStreamEvent.parse({
+                type: "content_block_stop",
+                index: contentBlockIndex,
+            }),
+        );
+        textBlockStarted = false;
+        contentBlockIndex += 1;
     };
 
     await writeEvent("message_start", AnthropicStreamEvent.parse({
@@ -476,26 +564,28 @@ export async function streamAnthropicMessages(
             if (chunk.kind === "data") {
                 const parsed = outputParser.process(chunk.text);
                 const deltaText = parsed.content ?? "";
-                if (!deltaText) {
+                const deltaReasoning = parsed.reasoning ?? "";
+                if (!deltaText && !deltaReasoning) {
                     continue;
                 }
 
-                if (!contentBlockStarted) {
+                if (deltaReasoning && includeReasoning) {
+                    await startThinkingBlock();
                     await writeEvent(
-                        "content_block_start",
+                        "content_block_delta",
                         AnthropicStreamEvent.parse({
-                            type: "content_block_start",
+                            type: "content_block_delta",
                             index: contentBlockIndex,
-                            content_block: AnthropicContentBlock.parse({
-                                type: "text",
-                                text: "",
+                            delta: AnthropicDelta.parse({
+                                type: "thinking_delta",
+                                thinking: deltaReasoning,
                             }),
                         }),
                     );
-                    contentBlockStarted = true;
                 }
 
                 if (deltaText) {
+                    await startTextBlock();
                     await writeEvent(
                         "content_block_delta",
                         AnthropicStreamEvent.parse({
@@ -520,22 +610,23 @@ export async function streamAnthropicMessages(
         }
 
         const flushed = outputParser.flush();
-        if (flushed.content) {
-            if (!contentBlockStarted) {
-                await writeEvent(
-                    "content_block_start",
-                    AnthropicStreamEvent.parse({
-                        type: "content_block_start",
-                        index: contentBlockIndex,
-                        content_block: AnthropicContentBlock.parse({
-                            type: "text",
-                            text: "",
-                        }),
+        if (flushed.reasoning && includeReasoning) {
+            await startThinkingBlock();
+            await writeEvent(
+                "content_block_delta",
+                AnthropicStreamEvent.parse({
+                    type: "content_block_delta",
+                    index: contentBlockIndex,
+                    delta: AnthropicDelta.parse({
+                        type: "thinking_delta",
+                        thinking: flushed.reasoning,
                     }),
-                );
-                contentBlockStarted = true;
-            }
+                }),
+            );
+        }
 
+        if (flushed.content) {
+            await startTextBlock();
             await writeEvent(
                 "content_block_delta",
                 AnthropicStreamEvent.parse({
@@ -549,16 +640,11 @@ export async function streamAnthropicMessages(
             );
         }
 
-        if (contentBlockStarted) {
-            await writeEvent(
-                "content_block_stop",
-                AnthropicStreamEvent.parse({
-                    type: "content_block_stop",
-                    index: contentBlockIndex,
-                }),
-            );
-            contentBlockStarted = false;
-            contentBlockIndex += 1;
+        if (thinkingBlockStarted) {
+            await stopThinkingBlock();
+        }
+        if (textBlockStarted) {
+            await stopTextBlock();
         }
 
         let toolCalls: ToolCall[] = outputParser.toolCalls;
