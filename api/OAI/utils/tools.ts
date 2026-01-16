@@ -31,17 +31,72 @@ export const TOOL_CALL_SCHEMA = {
 };
 
 function normalizeToolCallArray(raw: unknown): unknown[] | null {
+    const normalizeToolCall = (value: unknown): Record<string, unknown> | null => {
+        if (!value || typeof value !== "object") {
+            return null;
+        }
+
+        const rawObject = value as Record<string, unknown>;
+
+        if (rawObject.function && typeof rawObject.function === "object") {
+            return rawObject;
+        }
+
+        const name = typeof rawObject.name === "string"
+            ? rawObject.name
+            : typeof rawObject.tool_name === "string"
+            ? rawObject.tool_name
+            : typeof rawObject.function_name === "string"
+            ? rawObject.function_name
+            : undefined;
+
+        const args = rawObject.arguments ?? rawObject.parameters ??
+            rawObject.args ?? rawObject.input;
+
+        if (name) {
+            return {
+                function: {
+                    name,
+                    arguments: args ?? {},
+                },
+            };
+        }
+
+        const entries = Object.entries(rawObject);
+        if (entries.length === 1) {
+            const [key, value] = entries[0];
+            return {
+                function: {
+                    name: key,
+                    arguments: value ?? {},
+                },
+            };
+        }
+
+        return null;
+    };
+
     if (Array.isArray(raw)) {
-        return raw;
+        const normalized = raw
+            .map((item) => normalizeToolCall(item))
+            .filter((item) => item !== null);
+        return normalized.length > 0 ? normalized : null;
     }
 
     if (raw && typeof raw === "object") {
         const rawObject = raw as Record<string, unknown>;
         if (Array.isArray(rawObject.tool_calls)) {
-            return rawObject.tool_calls;
+            const normalized = rawObject.tool_calls
+                .map((item) => normalizeToolCall(item))
+                .filter((item) => item !== null);
+            return normalized.length > 0 ? normalized : null;
         }
         if ("function" in rawObject) {
             return [rawObject];
+        }
+        const normalized = normalizeToolCall(rawObject);
+        if (normalized) {
+            return [normalized];
         }
     }
 

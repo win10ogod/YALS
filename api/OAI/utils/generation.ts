@@ -38,6 +38,35 @@ export function convertFinishReason(chunk: FinishChunk) {
     }
 }
 
+export function mergeFinishMetrics(
+    base: FinishChunk,
+    extra: FinishChunk,
+): FinishChunk {
+    const promptTokens = base.promptTokens + extra.promptTokens;
+    const genTokens = base.genTokens + extra.genTokens;
+    const promptSec = base.promptSec + extra.promptSec;
+    const genSec = base.genSec + extra.genSec;
+    const totalSec = promptSec + genSec;
+
+    const promptTokensPerSec = promptSec > 0
+        ? promptTokens / promptSec
+        : base.promptTokensPerSec;
+    const genTokensPerSec = genSec > 0
+        ? genTokens / genSec
+        : base.genTokensPerSec;
+
+    return {
+        ...base,
+        promptTokens,
+        genTokens,
+        promptSec,
+        genSec,
+        totalSec,
+        promptTokensPerSec,
+        genTokensPerSec,
+    };
+}
+
 export async function staticGenerate(
     ctx: OAIContext,
     genType: GenerationType,

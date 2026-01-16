@@ -5,6 +5,7 @@ import {
     convertFinishReason,
     createUsageStats,
     GenerationType,
+    mergeFinishMetrics,
     staticGenerate,
     streamCollector,
 } from "@/api/OAI/utils/generation.ts";
@@ -25,10 +26,13 @@ import { CancellationError } from "@/common/errors.ts";
 import { logger } from "@/common/logging.ts";
 import { ToolCall, ToolSpec } from "../types/tools.ts";
 import {
-    createInlineToolCallParser,
     TOOL_CALL_SCHEMA,
     ToolCallProcessor,
 } from "./tools.ts";
+import {
+    createStreamingOutputParser,
+    parseOutputText,
+} from "./outputParsing.ts";
 import { OAIContext } from "../types/context.ts";
 import { normalizeChatMessages } from "./messages.ts";
 import { HTTPException } from "hono/http-exception";
@@ -45,35 +49,31 @@ interface TemplateFormatOptions {
 function createResponse(
     chunks: FinishChunk[],
     modelName: string,
+    promptTemplate: PromptTemplate,
     allowToolParse: boolean,
+    includeReasoning: boolean,
 ) {
     const choices: ChatCompletionRespChoice[] = [];
 
     for (const chunk of chunks) {
-        let content = chunk.text;
-        let toolCalls: ToolCall[] | undefined;
+        const fullText = chunk.fullText ?? chunk.text;
+        const parsed = parseOutputText(fullText, {
+            promptTemplate,
+            allowToolParse,
+            includeReasoning,
+        });
 
+        const content = parsed.content;
+        let toolCalls = parsed.toolCalls;
         if (chunk.toolCalls) {
             toolCalls = ToolCallProcessor.fromJson(chunk.toolCalls);
-        } else if (chunk.fullText) {
-            const shouldParseInline = allowToolParse ||
-                chunk.fullText.includes("<tool_call>");
-            if (!shouldParseInline) {
-                // keep content as-is
-            } else {
-                const extracted = ToolCallProcessor.extractFromText(
-                    chunk.fullText,
-                );
-                if (extracted.toolCalls.length > 0) {
-                    toolCalls = extracted.toolCalls;
-                    content = extracted.content;
-                }
-            }
         }
 
         const message = ChatCompletionMessage.parse({
             role: "assistant",
             content: content.length > 0 ? content : undefined,
+            reasoning: parsed.reasoning,
+            reasoning_content: parsed.reasoning,
         });
 
         if (toolCalls?.length) {
@@ -109,36 +109,59 @@ function createStreamChunk(
     modelName: string,
     cmplId: string,
     allowToolParse: boolean,
+    promptTemplate?: PromptTemplate,
 ) {
-    const message = ChatCompletionMessage.parse({
-        role: "assistant",
-        content: chunk.text,
-    });
+    let toolCalls: ToolCall[] | undefined;
 
     if (chunk.kind === "finish") {
         if (chunk.toolCalls) {
-            message.tool_calls = ToolCallProcessor.fromJson(chunk.toolCalls);
+            toolCalls = ToolCallProcessor.fromJson(chunk.toolCalls);
         } else if (chunk.fullText) {
             const shouldParseInline = allowToolParse ||
                 chunk.fullText.includes("<tool_call>");
             if (shouldParseInline) {
-                const extracted = ToolCallProcessor.extractFromText(
-                    chunk.fullText,
-                );
-                if (extracted.toolCalls.length > 0) {
-                    message.tool_calls = extracted.toolCalls;
+                const parsed = parseOutputText(chunk.fullText, {
+                    promptTemplate,
+                    allowToolParse,
+                    includeReasoning: false,
+                });
+                if (parsed.toolCalls?.length) {
+                    toolCalls = parsed.toolCalls;
                 }
             }
         }
     }
 
+    const delta: Record<string, unknown> = {
+        role: "assistant",
+    };
+    if (chunk.text) {
+        delta.content = chunk.text;
+    }
+    if (toolCalls?.length) {
+        delta.tool_calls = toolCalls.map((toolCall, index) => {
+            const args = toolCall.function.arguments;
+            return {
+                index,
+                id: toolCall.id,
+                type: toolCall.type,
+                function: {
+                    name: toolCall.function.name,
+                    arguments: typeof args === "string"
+                        ? args
+                        : JSON.stringify(args ?? {}),
+                },
+            };
+        });
+    }
+
     const choice = ChatCompletionStreamChoice.parse({
         index: chunk.taskIdx,
-        delta: message,
+        delta,
     });
 
     if (chunk.kind === "finish") {
-        choice.finish_reason = message.tool_calls?.length
+        choice.finish_reason = toolCalls?.length
             ? "tool_calls"
             : convertFinishReason(chunk);
     }
@@ -150,6 +173,29 @@ function createStreamChunk(
     });
 
     return response;
+}
+
+function createStreamDelta(
+    delta: Record<string, unknown>,
+    modelName: string,
+    cmplId: string,
+    taskIdx: number,
+    finishReason?: string,
+) {
+    const choice = ChatCompletionStreamChoice.parse({
+        index: taskIdx,
+        delta,
+    });
+
+    if (finishReason) {
+        choice.finish_reason = finishReason;
+    }
+
+    return ChatCompletionStreamChunk.parse({
+        id: cmplId,
+        choices: [choice],
+        model: modelName,
+    });
 }
 
 function createUsageChunk(
@@ -273,9 +319,14 @@ export async function streamChatCompletion(
 
     const toolStart = promptTemplate.metadata.tool_start;
     const allowToolParse = !!params.tools?.length;
-    const inlineToolParsers = allowToolParse
-        ? new Map<number, ReturnType<typeof createInlineToolCallParser>>()
-        : null;
+    const toolParseEnabled = allowToolParse ||
+        !!(promptTemplate.metadata.tool_call_start ||
+            promptTemplate.metadata.tool_calls_start);
+    const includeReasoning = params.include_reasoning ?? true;
+    const outputParsers = new Map<
+        number,
+        ReturnType<typeof createStreamingOutputParser>
+    >();
     const cmplId = `chatcmpl-${crypto.randomUUID().replaceAll("-", "")}`;
     const genAbortController = new AbortController();
     let finished = false;
@@ -331,34 +382,35 @@ export async function streamChatCompletion(
                 throw chunk;
             }
 
-            const inlineToolParser = inlineToolParsers
-                ? inlineToolParsers.get(chunk.taskIdx) ??
-                    createInlineToolCallParser()
-                : null;
-            if (inlineToolParser && inlineToolParsers) {
-                inlineToolParsers.set(chunk.taskIdx, inlineToolParser);
-            }
+            const outputParser = outputParsers.get(chunk.taskIdx) ??
+                createStreamingOutputParser({
+                    promptTemplate,
+                    allowToolParse: toolParseEnabled,
+                    includeReasoning,
+                });
+            outputParsers.set(chunk.taskIdx, outputParser);
 
             if (chunk.kind === "finish") {
-                if (inlineToolParser) {
-                    const flushedText = inlineToolParser.flush();
-                    if (flushedText) {
-                        const flushedChunk: GenerationChunk = {
-                            kind: "data",
-                            text: flushedText,
-                            taskIdx: chunk.taskIdx,
-                            requestId: chunk.requestId,
-                        };
-                        const streamChunk = createStreamChunk(
-                            flushedChunk,
-                            ctx.model.path.name,
-                            cmplId,
-                            allowToolParse,
-                        );
-                        await stream.writeSSE({
-                            data: JSON.stringify(streamChunk),
-                        });
+                const flushed = outputParser.flush();
+                if (flushed.content || flushed.reasoning) {
+                    const delta: Record<string, unknown> = {
+                        role: "assistant",
+                    };
+                    if (flushed.content) {
+                        delta.content = flushed.content;
                     }
+                    if (flushed.reasoning && includeReasoning) {
+                        delta.reasoning = flushed.reasoning;
+                    }
+                    const streamChunk = createStreamDelta(
+                        delta,
+                        ctx.model.path.name,
+                        cmplId,
+                        chunk.taskIdx,
+                    );
+                    await stream.writeSSE({
+                        data: JSON.stringify(streamChunk),
+                    });
                 }
 
                 // Handle tools
@@ -369,38 +421,50 @@ export async function streamChatCompletion(
                         [chunk],
                         params,
                         promptTemplate,
+                        media,
                     );
                 }
 
-                if (inlineToolParser && !chunk.toolCalls) {
-                    if (inlineToolParser.toolCalls.length > 0) {
-                        chunk.toolCalls = JSON.stringify(
-                            inlineToolParser.toolCalls,
-                        );
+                if (!chunk.toolCalls && outputParser.toolCalls.length > 0) {
+                    chunk.toolCalls = JSON.stringify(outputParser.toolCalls);
+                }
+                if (!chunk.toolCalls && chunk.fullText && toolParseEnabled) {
+                    const parsed = parseOutputText(chunk.fullText, {
+                        promptTemplate,
+                        allowToolParse: toolParseEnabled,
+                        includeReasoning: false,
+                    });
+                    if (parsed.toolCalls?.length) {
+                        chunk.toolCalls = JSON.stringify(parsed.toolCalls);
                     }
                 }
 
-                if (inlineToolParsers) {
-                    inlineToolParsers.delete(chunk.taskIdx);
-                }
+                outputParsers.delete(chunk.taskIdx);
 
                 completedTasks++;
             }
 
-            if (chunk.kind === "data" && inlineToolParser) {
-                const filteredText = inlineToolParser.process(chunk.text);
-                if (!filteredText) {
+            if (chunk.kind === "data") {
+                const parsed = outputParser.process(chunk.text);
+                if (!parsed.content && !parsed.reasoning) {
                     continue;
                 }
-                const filteredChunk: GenerationChunk = {
-                    ...chunk,
-                    text: filteredText,
+
+                const delta: Record<string, unknown> = {
+                    role: "assistant",
                 };
-                const streamChunk = createStreamChunk(
-                    filteredChunk,
+                if (parsed.content) {
+                    delta.content = parsed.content;
+                }
+                if (parsed.reasoning && includeReasoning) {
+                    delta.reasoning = parsed.reasoning;
+                }
+
+                const streamChunk = createStreamDelta(
+                    delta,
                     ctx.model.path.name,
                     cmplId,
-                    allowToolParse,
+                    chunk.taskIdx,
                 );
                 await stream.writeSSE({ data: JSON.stringify(streamChunk) });
             } else {
@@ -408,7 +472,8 @@ export async function streamChatCompletion(
                     chunk,
                     ctx.model.path.name,
                     cmplId,
-                    allowToolParse,
+                    toolParseEnabled,
+                    promptTemplate,
                 );
                 await stream.writeSSE({ data: JSON.stringify(streamChunk) });
             }
@@ -458,6 +523,10 @@ export async function generateChatCompletion(
         promptTemplate,
     );
     const allowToolParse = !!params.tools?.length;
+    const toolParseEnabled = allowToolParse ||
+        !!(promptTemplate.metadata.tool_call_start ||
+            promptTemplate.metadata.tool_calls_start);
+    const includeReasoning = params.include_reasoning ?? true;
 
     // Handle generation in the common function
     const generations = await staticGenerate(
@@ -475,12 +544,15 @@ export async function generateChatCompletion(
         generations,
         params,
         promptTemplate,
+        media,
     );
 
     const response = createResponse(
         generations,
         ctx.model.path.name,
-        allowToolParse,
+        promptTemplate,
+        toolParseEnabled,
+        includeReasoning,
     );
 
     logger.info(`Finished chat completion request ${ctx.requestId}`);
@@ -493,6 +565,7 @@ async function generateToolCalls(
     gens: FinishChunk[],
     params: ChatCompletionRequest,
     promptTemplate: PromptTemplate,
+    multimodalData?: Uint8Array[],
 ) {
     const toolGenTasks = [];
     const toolStart = promptTemplate.metadata.tool_start;
@@ -512,20 +585,18 @@ async function generateToolCalls(
 
         logger.info(`Tool call detected for request ${gen.requestId}`);
 
-        if (gen.fullText) {
-            prompt += gen.fullText;
-        }
-
         const toolCtx = {
             ...ctx,
             requestId: `${gen.requestId}-tool`,
         };
 
+        const toolPrompt = gen.fullText ? prompt + gen.fullText : prompt;
         const toolTask = staticGenerate(
             toolCtx,
             GenerationType.ChatCompletion,
-            prompt,
+            toolPrompt,
             toolParams,
+            multimodalData,
         );
 
         toolGenTasks.push(toolTask);
@@ -540,6 +611,10 @@ async function generateToolCalls(
             if (toolResult.status === "fulfilled" && toolResult.value[0]) {
                 const toolGen = toolResult.value[0];
                 gens[genIdx].toolCalls = toolGen.text;
+                Object.assign(
+                    gens[genIdx],
+                    mergeFinishMetrics(gens[genIdx], toolGen),
+                );
             }
         }
     }

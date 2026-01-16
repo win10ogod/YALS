@@ -26,6 +26,13 @@ export function range(start: number, stop?: number, step = 1): number[] {
 const TemplateMetadataSchema = z.object({
     stop_strings: z.array(z.string()).default([]),
     tool_start: z.string().optional(),
+    tool_call_start: z.string().optional(),
+    tool_call_end: z.string().optional(),
+    tool_calls_start: z.string().optional(),
+    tool_calls_end: z.string().optional(),
+    tool_call_sep: z.string().optional(),
+    reasoning_start: z.string().optional(),
+    reasoning_end: z.string().optional(),
 });
 
 type TemplateMetadata = z.infer<typeof TemplateMetadataSchema>;
@@ -131,7 +138,103 @@ export class PromptTemplate {
             visitNode(statement);
         });
 
+        this.inferMetadataFromTemplate(metadata, this.rawTemplate);
         return metadata;
+    }
+
+    private inferMetadataFromTemplate(
+        metadata: TemplateMetadata,
+        rawTemplate: string,
+    ) {
+        const setIfMissing = <K extends keyof TemplateMetadata>(
+            key: K,
+            value: TemplateMetadata[K],
+        ) => {
+            if (metadata[key] === undefined) {
+                metadata[key] = value;
+            }
+        };
+
+        const QWEN_TOOL_CALLS_BEGIN = "<\uFF5Ctool\u2581calls\u2581begin\uFF5C>";
+        const QWEN_TOOL_CALL_BEGIN = "<\uFF5Ctool\u2581call\u2581begin\uFF5C>";
+        const QWEN_TOOL_SEP = "<\uFF5Ctool\u2581sep\uFF5C>";
+        const QWEN_TOOL_CALL_END = "<\uFF5Ctool\u2581call\u2581end\uFF5C>";
+        const QWEN_TOOL_CALLS_END = "<\uFF5Ctool\u2581calls\u2581end\uFF5C>";
+
+        if (rawTemplate.includes("<think>") || rawTemplate.includes("</think>")) {
+            setIfMissing("reasoning_start", "<think>");
+            setIfMissing("reasoning_end", "</think>");
+        } else if (
+            rawTemplate.includes("[THINK]") ||
+            rawTemplate.includes("[/THINK]")
+        ) {
+            setIfMissing("reasoning_start", "[THINK]");
+            setIfMissing("reasoning_end", "[/THINK]");
+        }
+
+        if (rawTemplate.includes("<tool_call>")) {
+            setIfMissing("tool_call_start", "<tool_call>");
+        }
+        if (rawTemplate.includes("</tool_call>")) {
+            setIfMissing("tool_call_end", "</tool_call>");
+        }
+        if (rawTemplate.includes("<tool_calls>")) {
+            setIfMissing("tool_calls_start", "<tool_calls>");
+        }
+        if (rawTemplate.includes("</tool_calls>")) {
+            setIfMissing("tool_calls_end", "</tool_calls>");
+        }
+
+        if (rawTemplate.includes("<|tool_call|>")) {
+            setIfMissing("tool_call_start", "<|tool_call|>");
+        }
+        if (rawTemplate.includes("<|tools_prefix|>")) {
+            setIfMissing("tool_calls_start", "<|tools_prefix|>");
+        }
+        if (rawTemplate.includes("<|tools_suffix|>")) {
+            setIfMissing("tool_calls_end", "<|tools_suffix|>");
+        }
+
+        if (rawTemplate.includes("<|tool_calls_section_begin|>")) {
+            setIfMissing("tool_calls_start", "<|tool_calls_section_begin|>");
+        }
+        if (rawTemplate.includes("<|tool_calls_section_end|>")) {
+            setIfMissing("tool_calls_end", "<|tool_calls_section_end|>");
+        }
+        if (rawTemplate.includes("<|tool_call_begin|>")) {
+            setIfMissing("tool_call_start", "<|tool_call_begin|>");
+        }
+        if (rawTemplate.includes("<|tool_call_end|>")) {
+            setIfMissing("tool_call_end", "<|tool_call_end|>");
+        }
+        if (rawTemplate.includes("<|tool_call_argument_begin|>")) {
+            setIfMissing("tool_call_sep", "<|tool_call_argument_begin|>");
+        }
+
+        if (
+            rawTemplate.includes(QWEN_TOOL_CALLS_BEGIN) ||
+            rawTemplate.includes(QWEN_TOOL_CALLS_END)
+        ) {
+            setIfMissing("tool_calls_start", QWEN_TOOL_CALLS_BEGIN);
+            setIfMissing("tool_calls_end", QWEN_TOOL_CALLS_END);
+        }
+        if (rawTemplate.includes(QWEN_TOOL_CALL_BEGIN)) {
+            setIfMissing("tool_call_start", QWEN_TOOL_CALL_BEGIN);
+        }
+        if (rawTemplate.includes(QWEN_TOOL_CALL_END)) {
+            setIfMissing("tool_call_end", QWEN_TOOL_CALL_END);
+        }
+        if (rawTemplate.includes(QWEN_TOOL_SEP)) {
+            setIfMissing("tool_call_sep", QWEN_TOOL_SEP);
+        }
+
+        if (
+            rawTemplate.includes("<seed:tool_call>") ||
+            rawTemplate.includes("</seed:tool_call>")
+        ) {
+            setIfMissing("tool_call_start", "<seed:tool_call>");
+            setIfMissing("tool_call_end", "</seed:tool_call>");
+        }
     }
 
     static async fromFile(templatePath: string) {

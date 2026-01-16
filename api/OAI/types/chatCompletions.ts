@@ -26,6 +26,8 @@ export const ChatCompletionMessage = z.object({
     role: z.string().default("user"),
     content: z.union([z.string(), z.array(ChatCompletionMessagePart)])
         .cleanOptional(),
+    reasoning: z.string().cleanOptional(),
+    reasoning_content: z.string().cleanOptional(),
     tool_calls: z.array(ToolCall).cleanOptional(),
     tool_call_id: z.string().cleanOptional(),
 });
@@ -44,6 +46,7 @@ export const ChatCompletionRequest = z.aliasedObject(
         prompt_template: z.string().cleanOptional(),
         template_vars: z.record(z.string(), z.unknown()).nullish().coalesce({}),
         response_prefix: z.string().cleanOptional(),
+        include_reasoning: z.boolean().nullish().coalesce(true),
         tools: z.array(ToolSpec).cleanOptional(),
     }),
     [
