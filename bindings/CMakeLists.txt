@@ -3,7 +3,6 @@ project(LlamaMultiUserInference)
 set(CMAKE_CXX_STANDARD 17)
 
 option(LLGUIDANCE "Enable LLGuidance support (requires Rust)" OFF)
-option(MULTIMODAL "Enable multimodal (vision/audio) support" OFF)
 
 # Set RPath for Apple and Unix systems
 if (APPLE)
@@ -17,9 +16,18 @@ elseif (UNIX)
 endif()
 
 set(USE_CUSTOM_LLAMA OFF)
+set(USE_LOCAL_LLAMA OFF)
+set(LLAMACPP_LOCAL_DIR "${CMAKE_CURRENT_LIST_DIR}/../llama.cpp")
 
 # Do not cache these variables with subsequent builds
-if (DEFINED LLAMACPP_REPO)
+if (DEFINED LLAMACPP_SOURCE_DIR)
+    set(USE_CUSTOM_LLAMA ON)
+    set(USE_LOCAL_LLAMA ON)
+    set(LLAMACPP_SOURCE_DIR "${LLAMACPP_SOURCE_DIR}")
+elseif (EXISTS "${LLAMACPP_LOCAL_DIR}/CMakeLists.txt")
+    set(USE_LOCAL_LLAMA ON)
+    set(LLAMACPP_SOURCE_DIR "${LLAMACPP_LOCAL_DIR}")
+elseif (DEFINED LLAMACPP_REPO)
     set(USE_CUSTOM_LLAMA ON)
 else()
     set(LLAMACPP_REPO "https://github.com/ggerganov/llama.cpp.git")
@@ -29,15 +37,19 @@ endif()
 if (DEFINED LLAMACPP_COMMIT)
     set(USE_CUSTOM_LLAMA ON)
 else()
-    set(LLAMACPP_COMMIT "d98b548120eecf98f0f6eaa1ba7e29b3afda9f2e")
+    set(LLAMACPP_COMMIT "eef375ce167cf36d8ed2cf347be95a7a7a90fb5e")
 endif()
 
 if (USE_CUSTOM_LLAMA)
     message(STATUS "Using a custom commit or repo for llama.cpp. Build might not work as expected. Here be dragons!")
 endif()
 
-message(STATUS "Using llama.cpp repo ${LLAMACPP_REPO}")
-message(STATUS "Using llama.cpp tag ${LLAMACPP_COMMIT}")
+if (USE_LOCAL_LLAMA)
+    message(STATUS "Using local llama.cpp at ${LLAMACPP_SOURCE_DIR}")
+else()
+    message(STATUS "Using llama.cpp repo ${LLAMACPP_REPO}")
+    message(STATUS "Using llama.cpp tag ${LLAMACPP_COMMIT}")
+endif()
 
 # Optional: You can also enable mixed FP16/FP32 computation for faster processing
 # set(LLAMA_CUDA_F16 ON CACHE BOOL "llama.cpp: use float16 for GPU operations" FORCE)
@@ -51,6 +63,7 @@ set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: use libcurl" FORCE)
 
 # Enable common
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama.cpp: build common utils library" FORCE)
+set(LLAMA_BUILD_TOOLS ON CACHE BOOL "llama.cpp: build tools" FORCE)
 
 if(LLGUIDANCE)
     find_program(CARGO cargo)
@@ -68,11 +81,18 @@ endif()
 # Fetch llama.cpp latest
 # FIXME: Maybe use a vendored llama.cpp build for stability
 include(FetchContent)
-FetchContent_Declare(
-    llama
-    GIT_REPOSITORY ${LLAMACPP_REPO}
-    GIT_TAG ${LLAMACPP_COMMIT}
-)
+if (USE_LOCAL_LLAMA)
+    FetchContent_Declare(
+        llama
+        SOURCE_DIR ${LLAMACPP_SOURCE_DIR}
+    )
+else()
+    FetchContent_Declare(
+        llama
+        GIT_REPOSITORY ${LLAMACPP_REPO}
+        GIT_TAG ${LLAMACPP_COMMIT}
+    )
+endif()
 
 # Set build type to Release for performance
 set(CMAKE_BUILD_TYPE Release)
@@ -84,13 +104,6 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 FetchContent_MakeAvailable(llama)
 
 message(STATUS "llama source dir: ${llama_SOURCE_DIR}")
-
-# Build mtmd (multimodal) if enabled
-if(MULTIMODAL)
-    message(STATUS "Building with multimodal (vision/audio) support")
-    # Add mtmd subdirectory from llama.cpp tools
-    add_subdirectory(${llama_SOURCE_DIR}/tools/mtmd ${CMAKE_BINARY_DIR}/mtmd)
-endif()
 
 # Apple build changes
 # From llama-cpp-python
@@ -116,17 +129,14 @@ add_library(c_library SHARED
 target_include_directories(c_library PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/server
+    ${llama_SOURCE_DIR}/include
+    ${llama_SOURCE_DIR}/common
     ${llama_SOURCE_DIR}/src
+    ${llama_SOURCE_DIR}/tools/mtmd
 )
 
 # Link llama libraries to our c_library
-if(MULTIMODAL)
-    target_link_libraries(c_library PUBLIC llama common mtmd)
-    target_compile_definitions(c_library PUBLIC MULTIMODAL_ENABLED=1)
-    target_include_directories(c_library PUBLIC ${llama_SOURCE_DIR}/tools/mtmd)
-else()
-    target_link_libraries(c_library PUBLIC llama common)
-endif()
+target_link_libraries(c_library PUBLIC llama common mtmd)
 
 # Create our main executable
 add_executable(multi_user_inference
