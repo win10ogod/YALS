@@ -30,14 +30,14 @@ elseif (EXISTS "${LLAMACPP_LOCAL_DIR}/CMakeLists.txt")
 elseif (DEFINED LLAMACPP_REPO)
     set(USE_CUSTOM_LLAMA ON)
 else()
-    set(LLAMACPP_REPO "https://github.com/ikawrakow/ik_llama.cpp.git")
+    set(LLAMACPP_REPO "https://github.com/ggml-org/llama.cpp.git")
 endif()
 
 # Stable llama.cpp commit for bindings
 if (DEFINED LLAMACPP_COMMIT)
     set(USE_CUSTOM_LLAMA ON)
 else()
-    set(LLAMACPP_COMMIT "68cd52e583dc27db23780cfb562405c0522b6202")
+    set(LLAMACPP_COMMIT "54910bd4f3762b716e90b658beb68d349571057e")
 endif()
 
 if (USE_CUSTOM_LLAMA)
@@ -168,4 +168,5 @@ if(WIN32)
         WINDOWS_EXPORT_ALL_SYMBOLS TRUE
     )
 endif()
+
 
